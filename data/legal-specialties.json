@@ -1,0 +1,14 @@
+{
+  "specialties": [
+    { "id": "land", "labelEn": "Land & Property", "labelNe": "जग्गा र सम्पत्ति" },
+    { "id": "citizenship", "labelEn": "Citizenship & Immigration", "labelNe": "नागरिकता र अध्यागमन" },
+    { "id": "criminal", "labelEn": "Criminal Law", "labelNe": "फौजदारी कानून" },
+    { "id": "family", "labelEn": "Family Law", "labelNe": "पारिवारिक कानून" },
+    { "id": "business", "labelEn": "Business & Corporate", "labelNe": "व्यवसाय र कर्पोरेट" },
+    { "id": "tax", "labelEn": "Tax & Revenue", "labelNe": "कर र राजस्व" },
+    { "id": "labor", "labelEn": "Labor & Employment", "labelNe": "श्रम र रोजगार" },
+    { "id": "constitutional", "labelEn": "Constitutional & Administrative", "labelNe": "संवैधानिक र प्रशासनिक" },
+    { "id": "consumer", "labelEn": "Consumer & Contract", "labelNe": "उपभोक्ता र करार" },
+    { "id": "other", "labelEn": "Other", "labelNe": "अन्य" }
+  ]
+}

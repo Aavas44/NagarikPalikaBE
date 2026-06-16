@@ -1,0 +1,39 @@
+{
+  "provinces": [
+    {
+      "name": "Koshi",
+      "nameNe": "कोशी",
+      "districts": ["Bhojpur", "Dhankuta", "Ilam", "Jhapa", "Khotang", "Morang", "Okhaldhunga", "Panchthar", "Sankhuwasabha", "Solukhumbu", "Sunsari", "Taplejung", "Terhathum", "Udayapur"]
+    },
+    {
+      "name": "Madhesh",
+      "nameNe": "मधेश",
+      "districts": ["Bara", "Dhanusha", "Mahottari", "Parsa", "Rautahat", "Saptari", "Sarlahi", "Siraha"]
+    },
+    {
+      "name": "Bagmati",
+      "nameNe": "बागमती",
+      "districts": ["Bhaktapur", "Chitwan", "Dhading", "Dolakha", "Kathmandu", "Kavrepalanchok", "Lalitpur", "Makwanpur", "Nuwakot", "Ramechhap", "Rasuwa", "Sindhuli", "Sindhupalchok"]
+    },
+    {
+      "name": "Gandaki",
+      "nameNe": "गण्डकी",
+      "districts": ["Baglung", "Gorkha", "Kaski", "Lamjung", "Manang", "Mustang", "Myagdi", "Nawalpur", "Parbat", "Syangja", "Tanahun"]
+    },
+    {
+      "name": "Lumbini",
+      "nameNe": "लुम्बिनी",
+      "districts": ["Arghakhanchi", "Banke", "Bardiya", "Dang", "Gulmi", "Kapilvastu", "Nawalparasi East", "Palpa", "Parasi", "Pyuthan", "Rolpa", "Rukum East", "Rupandehi"]
+    },
+    {
+      "name": "Karnali",
+      "nameNe": "कर्णाली",
+      "districts": ["Dailekh", "Dolpa", "Humla", "Jajarkot", "Jumla", "Kalikot", "Mugu", "Rukum West", "Salyan", "Surkhet"]
+    },
+    {
+      "name": "Sudurpashchim",
+      "nameNe": "सुदूरपश्चिम",
+      "districts": ["Achham", "Baitadi", "Bajhang", "Bajura", "Dadeldhura", "Darchula", "Doti", "Kailali", "Kanchanpur"]
+    }
+  ]
+}

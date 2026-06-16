@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Secrets — never commit (examples are allowed)
+.env
+.env.*
+!.env.example
