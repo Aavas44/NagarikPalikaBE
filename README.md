@@ -69,7 +69,8 @@ The database is auto-seeded on first startup with sample Nepal-focused content.
 1. Deploy this folder (monorepo path: `backend/`, or as a standalone repo).
 2. **Build command:** `npm install && npm run build`
 3. **Start command:** `npm run start`
-4. Set environment variables (at minimum `MONGODB_URI`, `JWT_SECRET`, `FRONTEND_URL`, `NODE_ENV=production`).
+4. **Node version:** 18–22 (set in Render if needed; avoid Node 26 until tested)
+5. Set environment variables (at minimum `MONGODB_URI`, `JWT_SECRET`, `FRONTEND_URL`, `NODE_ENV=production`).
 5. On the frontend, set `API_URL` to this service’s public URL.
 
 For Google OAuth, set `GOOGLE_CALLBACK_URL` to `https://your-api.example.com/api/auth/google/callback`.

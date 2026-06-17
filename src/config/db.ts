@@ -1,12 +1,12 @@
 import mongoose from "mongoose";
-import { MongoMemoryServer } from "mongodb-memory-server";
 
 const MONGODB_URI =
   process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/nagarik-palika";
 
-let memoryServer: MongoMemoryServer | null = null;
+let memoryServer: import("mongodb-memory-server").MongoMemoryServer | null = null;
 
 async function connectMemory(): Promise<void> {
+  const { MongoMemoryServer } = await import("mongodb-memory-server");
   memoryServer = await MongoMemoryServer.create();
   const uri = memoryServer.getUri("nagarik-palika");
   await mongoose.connect(uri);
