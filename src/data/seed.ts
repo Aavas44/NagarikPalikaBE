@@ -106,6 +106,24 @@ const seedTemplates = [
     previewGradient: "linear-gradient(160deg,#FAEEDA,#FAC775)",
   },
   {
+    slug: "ghar-bato-sifaris",
+    name: {
+      en: "House Passage Recommendation (Ghar Bato Sifaris)",
+      ne: "घर बाटो सिफारिस",
+    },
+    description: {
+      en: "Ward office — certifies house and road access rights",
+      ne: "वडा कार्यालय — घर र बाटो प्रयोग अधिकार प्रमाणित",
+    },
+    category: "local-government",
+    fileName: "ghar-bato-sifaris.docx",
+    fileType: "docx" as const,
+    downloads: 1340,
+    status: "published" as const,
+    previewEmoji: "🏠",
+    previewGradient: "linear-gradient(160deg,#E8F4FC,#9DCAE8)",
+  },
+  {
     slug: "birth-certificate-form",
     name: { en: "Birth Certificate Application", ne: "जन्म प्रमाणपत्र आवेदन" },
     description: {
@@ -273,6 +291,11 @@ export async function seedDatabase(): Promise<void> {
   if (templateCount === 0) {
     await Template.insertMany(seedTemplates);
     console.log("Seeded templates");
+  } else {
+    for (const tmpl of seedTemplates) {
+      await Template.updateOne({ slug: tmpl.slug }, { $setOnInsert: tmpl }, { upsert: true });
+    }
+    console.log("Ensured seed templates exist");
   }
 
   const categoryCount = await CategoryCard.countDocuments();

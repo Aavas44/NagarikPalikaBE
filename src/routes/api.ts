@@ -110,6 +110,15 @@ router.get("/templates", async (req, res) => {
   res.json(docs.map(templateToJson));
 });
 
+router.get("/templates/:slug", async (req, res) => {
+  const doc = await Template.findOne({ slug: req.params.slug, status: "published" });
+  if (!doc) {
+    res.status(404).json({ error: "Template not found" });
+    return;
+  }
+  res.json(templateToJson(doc));
+});
+
 router.post("/templates", requireAuth, requireUserType("admin"), async (req, res) => {
   const { name, description, category, fileName, fileType, status } = req.body as {
     name?: { en: string; ne: string };
