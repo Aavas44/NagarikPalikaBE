@@ -221,12 +221,12 @@ const seedCategories = [
 ];
 
 const seedQuickTags = [
-  { en: "Citizenship", ne: "नागरिकता", sortOrder: 1 },
-  { en: "PAN card", ne: "प्यान कार्ड", sortOrder: 2 },
-  { en: "Birth certificate", ne: "जन्म प्रमाणपत्र", sortOrder: 3 },
-  { en: "Driving license", ne: "सवारी चालक अनुमतिपत्र", sortOrder: 4 },
-  { en: "Business registration", ne: "व्यवसाय दर्ता", sortOrder: 5 },
-  { en: "Land transfer", ne: "जग्गा हस्तान्तरण", sortOrder: 6 },
+  { en: "Sifaris", ne: "सिफारिस", sortOrder: 1 },
+  { en: "Likhat", ne: "लिखत", sortOrder: 2 },
+  { en: "Chhadpatra", ne: "छोडपत्र", sortOrder: 3 },
+  { en: "Firadpatra", ne: "फिरादपत्र", sortOrder: 4 },
+  { en: "Hakdaiya", ne: "हकदैया", sortOrder: 5 },
+  { en: "Ghar Naksa Pass", ne: "घर नक्सा पास", sortOrder: 6 },
 ];
 
 const seedLawyers = [
@@ -304,11 +304,9 @@ export async function seedDatabase(): Promise<void> {
     console.log("Seeded categories");
   }
 
-  const tagCount = await QuickTag.countDocuments();
-  if (tagCount === 0) {
-    await QuickTag.insertMany(seedQuickTags);
-    console.log("Seeded quick tags");
-  }
+  await QuickTag.deleteMany({});
+  await QuickTag.insertMany(seedQuickTags);
+  console.log("Synced quick tags");
 
   const lawyerCount = await Lawyer.countDocuments();
   if (lawyerCount === 0) {
