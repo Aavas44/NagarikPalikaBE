@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { Feedback, feedbackToJson } from "../models/Feedback";
 import { AdvocateProfile, advocateToJson } from "../models/AdvocateProfile";
 import { ConsultationRequest, consultationToJson } from "../models/ConsultationRequest";
 import { ConsultationEventLog, eventLogToJson } from "../models/ConsultationEventLog";
@@ -140,6 +141,44 @@ router.post("/consultations/:id/complete", async (req: AuthRequest, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to complete" });
+  }
+});
+
+router.get("/feedback", async (req, res) => {
+  try {
+    const { status } = req.query;
+    const filter: Record<string, unknown> = {};
+    if (status === "new" || status === "reviewed") {
+      filter.status = status;
+    }
+
+    const items = await Feedback.find(filter).sort({ createdAt: -1 }).limit(500);
+    res.json(items.map(feedbackToJson));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to list feedback" });
+  }
+});
+
+router.patch("/feedback/:id/review", async (req: AuthRequest, res) => {
+  try {
+    const feedback = await Feedback.findByIdAndUpdate(
+      req.params.id,
+      {
+        status: "reviewed",
+        reviewedAt: new Date(),
+        reviewedBy: req.user!.id,
+      },
+      { new: true }
+    );
+    if (!feedback) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    res.json(feedbackToJson(feedback));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update feedback" });
   }
 });
 
