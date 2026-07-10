@@ -315,19 +315,29 @@ export async function seedDatabase(): Promise<void> {
     console.log("Seeded lawyers");
   }
 
-  const skCount = await SajiloKanunAccount.countDocuments();
-  if (skCount === 0) {
-    const passwordHash = await bcrypt.hash(
-      process.env.SAJILOKANUN_DEMO_PASSWORD ?? "Demo@123",
-      10
-    );
-    await SajiloKanunAccount.create({
-      username: (process.env.SAJILOKANUN_DEMO_USERNAME ?? "demo").toLowerCase(),
-      passwordHash,
-      name: "Demo User",
-      email: process.env.SAJILOKANUN_DEMO_EMAIL ?? "demo@nagarikpalika.gov.np",
-      active: true,
-    });
-    console.log("Seeded Sajilo Kanun demo account");
-  }
+  await seedSajiloKanunDemoAccount();
+}
+
+async function seedSajiloKanunDemoAccount() {
+  const username = (process.env.SAJILOKANUN_DEMO_USERNAME ?? "demo").trim().toLowerCase();
+  const password = process.env.SAJILOKANUN_DEMO_PASSWORD ?? "Demo@123";
+  const email = (process.env.SAJILOKANUN_DEMO_EMAIL ?? "demo@nagarikpalika.gov.np")
+    .trim()
+    .toLowerCase();
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  await SajiloKanunAccount.findOneAndUpdate(
+    { username },
+    {
+      $set: {
+        passwordHash,
+        name: "Demo User",
+        email,
+        active: true,
+      },
+    },
+    { upsert: true }
+  );
+
+  console.log(`Sajilo Kanun demo account ready (${username})`);
 }
