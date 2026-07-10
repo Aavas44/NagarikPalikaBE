@@ -5,6 +5,7 @@ import { Template } from "../models/Template";
 import { CategoryCard } from "../models/CategoryCard";
 import { QuickTag } from "../models/QuickTag";
 import { Lawyer } from "../models/Lawyer";
+import { SajiloKanunAccount } from "../models/SajiloKanunAccount";
 
 const seedTerms = [
   {
@@ -312,5 +313,21 @@ export async function seedDatabase(): Promise<void> {
   if (lawyerCount === 0) {
     await Lawyer.insertMany(seedLawyers);
     console.log("Seeded lawyers");
+  }
+
+  const skCount = await SajiloKanunAccount.countDocuments();
+  if (skCount === 0) {
+    const passwordHash = await bcrypt.hash(
+      process.env.SAJILOKANUN_DEMO_PASSWORD ?? "Demo@123",
+      10
+    );
+    await SajiloKanunAccount.create({
+      username: (process.env.SAJILOKANUN_DEMO_USERNAME ?? "demo").toLowerCase(),
+      passwordHash,
+      name: "Demo User",
+      email: process.env.SAJILOKANUN_DEMO_EMAIL ?? "demo@nagarikpalika.gov.np",
+      active: true,
+    });
+    console.log("Seeded Sajilo Kanun demo account");
   }
 }

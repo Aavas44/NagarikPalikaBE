@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { Feedback, feedbackToJson } from "../models/Feedback";
+import { DemoRequest, demoRequestToJson } from "../models/DemoRequest";
 import { AdvocateProfile, advocateToJson } from "../models/AdvocateProfile";
 import { ConsultationRequest, consultationToJson } from "../models/ConsultationRequest";
 import { ConsultationEventLog, eventLogToJson } from "../models/ConsultationEventLog";
@@ -179,6 +180,55 @@ router.patch("/feedback/:id/review", async (req: AuthRequest, res) => {
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to update feedback" });
+  }
+});
+
+router.get("/demo-requests", async (req, res) => {
+  try {
+    const { status } = req.query;
+    const filter: Record<string, unknown> = {};
+    if (
+      status === "new" ||
+      status === "reviewed" ||
+      status === "approved" ||
+      status === "rejected"
+    ) {
+      filter.status = status;
+    }
+
+    const items = await DemoRequest.find(filter).sort({ createdAt: -1 }).limit(500);
+    res.json(items.map(demoRequestToJson));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to list demo requests" });
+  }
+});
+
+router.patch("/demo-requests/:id/review", async (req: AuthRequest, res) => {
+  try {
+    const { status } = req.body as { status?: string };
+    if (status !== "reviewed" && status !== "approved" && status !== "rejected") {
+      res.status(400).json({ error: "Invalid status" });
+      return;
+    }
+
+    const request = await DemoRequest.findByIdAndUpdate(
+      req.params.id,
+      {
+        status,
+        reviewedAt: new Date(),
+        reviewedBy: req.user!.id,
+      },
+      { new: true }
+    );
+    if (!request) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    res.json(demoRequestToJson(request));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to update demo request" });
   }
 });
 
