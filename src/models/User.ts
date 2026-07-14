@@ -18,7 +18,7 @@ const userSchema = new Schema<IUser>(
     email: { type: String, required: true, unique: true, lowercase: true },
     userType: {
       type: String,
-      enum: ["user", "advocate", "admin"],
+      enum: ["user", "advocate", "admin", "superadmin"],
       default: "user",
     },
     authProvider: { type: String, enum: ["google", "local"], default: "local" },

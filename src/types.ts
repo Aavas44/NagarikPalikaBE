@@ -1,4 +1,9 @@
-export type UserType = "user" | "advocate" | "admin";
+export type UserType = "user" | "advocate" | "admin" | "superadmin";
+
+export type SajiloKanunAccountRole = "admin" | "member";
+
+export type LegalCaseType = "civil" | "criminal" | "other";
+export type LegalCaseStatus = "open" | "pending" | "closed";
 
 export type Category =
   | "citizenship"

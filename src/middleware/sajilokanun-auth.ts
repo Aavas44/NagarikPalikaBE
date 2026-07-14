@@ -1,6 +1,7 @@
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import { JWT_SECRET } from "./auth";
+import type { SajiloKanunAccountRole } from "../types";
 
 export const SAJILO_KANUN_USER_TYPE = "sajilo_kanun" as const;
 
@@ -8,6 +9,8 @@ export interface SajiloKanunAuthUser {
   id: string;
   username: string;
   name: string;
+  teamId: string | null;
+  role: SajiloKanunAccountRole | null;
 }
 
 export interface SajiloKanunAuthRequest extends Request {
@@ -20,6 +23,8 @@ export function signSajiloKanunToken(user: SajiloKanunAuthUser): string {
       sub: user.id,
       username: user.username,
       name: user.name,
+      teamId: user.teamId,
+      role: user.role,
       userType: SAJILO_KANUN_USER_TYPE,
     },
     JWT_SECRET,
@@ -33,6 +38,8 @@ export function verifySajiloKanunToken(token: string): SajiloKanunAuthUser | nul
       sub: string;
       username: string;
       name: string;
+      teamId?: string | null;
+      role?: SajiloKanunAccountRole | null;
       userType?: string;
     };
     if (payload.userType !== SAJILO_KANUN_USER_TYPE) return null;
@@ -40,6 +47,8 @@ export function verifySajiloKanunToken(token: string): SajiloKanunAuthUser | nul
       id: payload.sub,
       username: payload.username,
       name: payload.name,
+      teamId: payload.teamId ?? null,
+      role: payload.role ?? null,
     };
   } catch {
     return null;
@@ -66,5 +75,35 @@ export function requireSajiloKanunAuth(
   }
 
   req.sajiloKanunUser = user;
+  next();
+}
+
+export function requireSkRole(...allowed: SajiloKanunAccountRole[]) {
+  return (req: SajiloKanunAuthRequest, res: Response, next: NextFunction) => {
+    if (!req.sajiloKanunUser) {
+      res.status(401).json({ error: "Sajilo Kanun access required" });
+      return;
+    }
+    if (!req.sajiloKanunUser.role || !allowed.includes(req.sajiloKanunUser.role)) {
+      res.status(403).json({ error: "Insufficient permissions" });
+      return;
+    }
+    if (!req.sajiloKanunUser.teamId) {
+      res.status(403).json({ error: "No team assigned" });
+      return;
+    }
+    next();
+  };
+}
+
+export function requireSkTeamMember(req: SajiloKanunAuthRequest, res: Response, next: NextFunction) {
+  if (!req.sajiloKanunUser) {
+    res.status(401).json({ error: "Sajilo Kanun access required" });
+    return;
+  }
+  if (!req.sajiloKanunUser.teamId) {
+    res.status(403).json({ error: "No team assigned" });
+    return;
+  }
   next();
 }

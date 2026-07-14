@@ -1,11 +1,38 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
-import { SajiloKanunAccount, sajiloKanunAccountToJson } from "../models/SajiloKanunAccount";
+import mongoose from "mongoose";
+import { Team } from "../models/Team";
+import {
+  SajiloKanunAccount,
+  sajiloKanunAccountToJson,
+} from "../models/SajiloKanunAccount";
+import {
+  LegalCase,
+  legalCaseToJson,
+  type LegalCaseStatus,
+  type LegalCaseType,
+} from "../models/LegalCase";
 import {
   requireSajiloKanunAuth,
+  requireSkRole,
+  requireSkTeamMember,
   signSajiloKanunToken,
   type SajiloKanunAuthRequest,
 } from "../middleware/sajilokanun-auth";
+import {
+  createTeamAccount,
+  assertTeamActive,
+  accountToAuthUser,
+} from "../services/team-accounts";
+import {
+  getSajiloKanunUsageLog,
+  getSajiloKanunUsageSummary,
+  recordSajiloKanunUsage,
+  sanitizeUsageEntries,
+  getTeamUsageLog,
+  getTeamUsageSummary,
+  type UsageRequestMeta,
+} from "../services/sajilokanun-usage";
 
 const router = Router();
 
@@ -28,17 +55,22 @@ router.post("/login", async (req, res) => {
       return;
     }
 
+    if (account.teamId) {
+      const teamActive = await assertTeamActive(account.teamId.toString());
+      if (!teamActive) {
+        res.status(403).json({ error: "Your law firm account is inactive" });
+        return;
+      }
+    }
+
     const valid = await bcrypt.compare(password, account.passwordHash);
     if (!valid) {
       res.status(401).json({ error: "Invalid username or password" });
       return;
     }
 
-    const token = signSajiloKanunToken({
-      id: account._id.toString(),
-      username: account.username,
-      name: account.name,
-    });
+    const authUser = accountToAuthUser(account);
+    const token = signSajiloKanunToken(authUser);
 
     res.json({
       token,
@@ -51,7 +83,349 @@ router.post("/login", async (req, res) => {
 });
 
 router.get("/me", requireSajiloKanunAuth, async (req: SajiloKanunAuthRequest, res) => {
-  res.json({ user: req.sajiloKanunUser });
+  try {
+    const account = await SajiloKanunAccount.findById(req.sajiloKanunUser!.id);
+    if (!account) {
+      res.status(404).json({ error: "Account not found" });
+      return;
+    }
+    let teamName: string | null = null;
+    if (account.teamId) {
+      const team = await Team.findById(account.teamId).select("name");
+      teamName = team?.name ?? null;
+    }
+    res.json({
+      user: {
+        ...sajiloKanunAccountToJson(account),
+        teamName,
+      },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load profile" });
+  }
 });
+
+router.get("/usage", requireSajiloKanunAuth, async (req: SajiloKanunAuthRequest, res) => {
+  try {
+    const user = req.sajiloKanunUser!;
+    if (user.role === "admin" && user.teamId) {
+      const usage = await getTeamUsageSummary(user.teamId);
+      res.json({ usage, scope: "team" });
+      return;
+    }
+    const usage = await getSajiloKanunUsageSummary(user.id);
+    res.json({ usage, scope: "self" });
+  } catch (err) {
+    console.error("Sajilo Kanun usage fetch error:", err);
+    res.status(500).json({ error: "Failed to load token usage" });
+  }
+});
+
+router.get("/usage/log", requireSajiloKanunAuth, async (req: SajiloKanunAuthRequest, res) => {
+  try {
+    const limit = Number(req.query.limit ?? 30);
+    const offset = Number(req.query.offset ?? 0);
+    const user = req.sajiloKanunUser!;
+
+    if (user.role === "admin" && user.teamId) {
+      const log = await getTeamUsageLog(user.teamId, { limit, offset });
+      res.json({ ...log, scope: "team" });
+      return;
+    }
+
+    const log = await getSajiloKanunUsageLog(user.id, { limit, offset });
+    res.json({ ...log, scope: "self" });
+  } catch (err) {
+    console.error("Sajilo Kanun usage log error:", err);
+    res.status(500).json({ error: "Failed to load usage log" });
+  }
+});
+
+router.post("/usage", requireSajiloKanunAuth, async (req: SajiloKanunAuthRequest, res) => {
+  try {
+    const entries = sanitizeUsageEntries(req.body?.entries);
+    const requestId =
+      typeof req.body?.requestId === "string" ? req.body.requestId.trim() : "";
+    const requestType =
+      req.body?.requestType === "normalize" || req.body?.requestType === "chat"
+        ? req.body.requestType
+        : undefined;
+    const label = typeof req.body?.label === "string" ? req.body.label : undefined;
+
+    const request: UsageRequestMeta | undefined =
+      requestId && requestType
+        ? { requestId, requestType, label }
+        : undefined;
+
+    const usage = await recordSajiloKanunUsage(req.sajiloKanunUser!.id, entries, request);
+    res.json({ usage, recorded: entries.length });
+  } catch (err) {
+    console.error("Sajilo Kanun usage record error:", err);
+    res.status(500).json({ error: "Failed to record token usage" });
+  }
+});
+
+// --- Firm admin: team members ---
+
+router.get(
+  "/team/members",
+  requireSajiloKanunAuth,
+  requireSkRole("admin"),
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const accounts = await SajiloKanunAccount.find({
+        teamId: req.sajiloKanunUser!.teamId,
+      }).sort({ createdAt: -1 });
+      res.json(accounts.map(sajiloKanunAccountToJson));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to list members" });
+    }
+  }
+);
+
+router.post(
+  "/team/members",
+  requireSajiloKanunAuth,
+  requireSkRole("admin"),
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const { username, password, name, email } = req.body as {
+        username?: string;
+        password?: string;
+        name?: string;
+        email?: string;
+      };
+
+      if (!username?.trim() || !password || !name?.trim()) {
+        res.status(400).json({ error: "Username, password, and name are required" });
+        return;
+      }
+
+      const account = await createTeamAccount({
+        teamId: req.sajiloKanunUser!.teamId!,
+        username,
+        password,
+        name,
+        email,
+        role: "member",
+        createdBy: req.sajiloKanunUser!.id,
+      });
+
+      res.status(201).json(sajiloKanunAccountToJson(account));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to create member";
+      const status = message.includes("already taken") ? 409 : 400;
+      console.error(err);
+      res.status(status).json({ error: message });
+    }
+  }
+);
+
+router.patch(
+  "/team/members/:id",
+  requireSajiloKanunAuth,
+  requireSkRole("admin"),
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const account = await SajiloKanunAccount.findOne({
+        _id: req.params.id,
+        teamId: req.sajiloKanunUser!.teamId,
+        role: "member",
+      });
+      if (!account) {
+        res.status(404).json({ error: "Member not found" });
+        return;
+      }
+
+      const { active, password } = req.body as { active?: boolean; password?: string };
+      if (typeof active === "boolean") account.active = active;
+      if (password) account.passwordHash = await bcrypt.hash(password, 10);
+      await account.save();
+
+      res.json(sajiloKanunAccountToJson(account));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to update member" });
+    }
+  }
+);
+
+router.get(
+  "/team/usage",
+  requireSajiloKanunAuth,
+  requireSkRole("admin"),
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const limit = Number(req.query.limit ?? 30);
+      const offset = Number(req.query.offset ?? 0);
+      const teamId = req.sajiloKanunUser!.teamId!;
+      const summary = await getTeamUsageSummary(teamId);
+      const log = await getTeamUsageLog(teamId, { limit, offset });
+      res.json({ usage: summary, ...log });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to load team usage" });
+    }
+  }
+);
+
+// --- Cases ---
+
+function parseCaseType(value: unknown): LegalCaseType | null {
+  if (value === "civil" || value === "criminal" || value === "other") return value;
+  return null;
+}
+
+function parseCaseStatus(value: unknown): LegalCaseStatus | null {
+  if (value === "open" || value === "pending" || value === "closed") return value;
+  return null;
+}
+
+router.get(
+  "/cases",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const user = req.sajiloKanunUser!;
+      const filter: Record<string, unknown> = { teamId: user.teamId };
+
+      if (user.role === "member") {
+        filter.assignedMemberIds = new mongoose.Types.ObjectId(user.id);
+      }
+
+      const cases = await LegalCase.find(filter).sort({ updatedAt: -1 });
+      res.json(cases.map(legalCaseToJson));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to list cases" });
+    }
+  }
+);
+
+router.post(
+  "/cases",
+  requireSajiloKanunAuth,
+  requireSkRole("admin"),
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const { title, caseNo, type, status, notes, assignedMemberIds } = req.body as {
+        title?: string;
+        caseNo?: string;
+        type?: string;
+        status?: string;
+        notes?: string;
+        assignedMemberIds?: string[];
+      };
+
+      const caseType = parseCaseType(type);
+      if (!title?.trim() || !caseNo?.trim() || !caseType) {
+        res.status(400).json({ error: "Title, case number, and type are required" });
+        return;
+      }
+
+      const caseStatus = parseCaseStatus(status) ?? "open";
+      const teamId = req.sajiloKanunUser!.teamId!;
+
+      const memberIds = await validateAssignedMembers(
+        teamId,
+        assignedMemberIds ?? []
+      );
+
+      const legalCase = await LegalCase.create({
+        teamId,
+        title: title.trim(),
+        caseNo: caseNo.trim(),
+        type: caseType,
+        status: caseStatus,
+        notes: notes?.trim(),
+        assignedMemberIds: memberIds,
+        createdBy: req.sajiloKanunUser!.id,
+      });
+
+      res.status(201).json(legalCaseToJson(legalCase));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to create case";
+      const status = message.includes("duplicate") ? 409 : 400;
+      console.error(err);
+      res.status(status).json({ error: message });
+    }
+  }
+);
+
+router.patch(
+  "/cases/:id",
+  requireSajiloKanunAuth,
+  requireSkRole("admin"),
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const legalCase = await LegalCase.findOne({
+        _id: req.params.id,
+        teamId: req.sajiloKanunUser!.teamId,
+      });
+      if (!legalCase) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
+
+      const { title, caseNo, type, status, notes, assignedMemberIds } = req.body as {
+        title?: string;
+        caseNo?: string;
+        type?: string;
+        status?: string;
+        notes?: string;
+        assignedMemberIds?: string[];
+      };
+
+      if (title?.trim()) legalCase.title = title.trim();
+      if (caseNo?.trim()) legalCase.caseNo = caseNo.trim();
+      const caseType = parseCaseType(type);
+      if (caseType) legalCase.type = caseType;
+      const caseStatus = parseCaseStatus(status);
+      if (caseStatus) legalCase.status = caseStatus;
+      if (notes !== undefined) legalCase.notes = notes.trim();
+      if (assignedMemberIds) {
+        legalCase.assignedMemberIds = await validateAssignedMembers(
+          req.sajiloKanunUser!.teamId!,
+          assignedMemberIds
+        );
+      }
+
+      await legalCase.save();
+      res.json(legalCaseToJson(legalCase));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to update case";
+      const status = message.includes("duplicate") ? 409 : 400;
+      console.error(err);
+      res.status(status).json({ error: message });
+    }
+  }
+);
+
+async function validateAssignedMembers(
+  teamId: string,
+  memberIds: string[]
+): Promise<mongoose.Types.ObjectId[]> {
+  if (memberIds.length === 0) return [];
+
+  const objectIds = memberIds
+    .filter((id) => mongoose.Types.ObjectId.isValid(id))
+    .map((id) => new mongoose.Types.ObjectId(id));
+
+  const count = await SajiloKanunAccount.countDocuments({
+    _id: { $in: objectIds },
+    teamId,
+    role: "member",
+    active: true,
+  });
+
+  if (count !== objectIds.length) {
+    throw new Error("One or more assigned members are invalid");
+  }
+
+  return objectIds;
+}
 
 export default router;

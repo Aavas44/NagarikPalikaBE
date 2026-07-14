@@ -55,12 +55,41 @@ export function requireUserType(...allowed: UserType[]) {
       res.status(401).json({ error: "Authentication required" });
       return;
     }
-    if (!allowed.includes(req.user.userType)) {
+    const type = req.user.userType;
+    const ok =
+      allowed.includes(type) || (type === "superadmin" && allowed.includes("admin"));
+    if (!ok) {
       res.status(403).json({ error: "Insufficient permissions" });
       return;
     }
     next();
   };
+}
+
+/** Platform superadmin only (SK team management). */
+export function requireSuperadmin(req: AuthRequest, res: Response, next: NextFunction) {
+  if (!req.user) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  if (req.user.userType !== "superadmin") {
+    res.status(403).json({ error: "Superadmin access required" });
+    return;
+  }
+  next();
+}
+
+/** Nagarik Palika admin panel — admin or superadmin. */
+export function requireAdminPanel(req: AuthRequest, res: Response, next: NextFunction) {
+  if (!req.user) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  if (req.user.userType !== "admin" && req.user.userType !== "superadmin") {
+    res.status(403).json({ error: "Insufficient permissions" });
+    return;
+  }
+  next();
 }
 
 export { JWT_SECRET };

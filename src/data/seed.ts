@@ -6,6 +6,8 @@ import { CategoryCard } from "../models/CategoryCard";
 import { QuickTag } from "../models/QuickTag";
 import { Lawyer } from "../models/Lawyer";
 import { SajiloKanunAccount } from "../models/SajiloKanunAccount";
+import { Team } from "../models/Team";
+import { backfillUsageTeamIds } from "../services/sajilokanun-usage";
 
 const seedTerms = [
   {
@@ -266,21 +268,7 @@ export async function seedDatabase(): Promise<void> {
     { $set: { userType: "admin", authProvider: "local" }, $unset: { role: 1 } }
   );
 
-  const userCount = await User.countDocuments();
-  if (userCount === 0) {
-    const passwordHash = await bcrypt.hash(
-      process.env.ADMIN_PASSWORD ?? "Admin@123",
-      10
-    );
-    await User.create({
-      name: "Super Admin",
-      email: process.env.ADMIN_EMAIL ?? "admin@nagarikpalika.gov.np",
-      passwordHash,
-      userType: "admin",
-      authProvider: "local",
-    });
-    console.log("Seeded admin user");
-  }
+  await seedSuperadmin();
 
   const termCount = await Term.countDocuments();
   if (termCount === 0) {
@@ -316,6 +304,54 @@ export async function seedDatabase(): Promise<void> {
   }
 
   await seedSajiloKanunDemoAccount();
+  await seedDefaultTeam();
+}
+
+async function seedSuperadmin(): Promise<void> {
+  const email = (
+    process.env.SUPERADMIN_EMAIL ??
+    process.env.ADMIN_EMAIL ??
+    "shree.lamichhane44@gmail.com"
+  )
+    .trim()
+    .toLowerCase();
+  const password =
+    process.env.SUPERADMIN_PASSWORD ?? process.env.ADMIN_PASSWORD ?? "Password@123";
+  const passwordHash = await bcrypt.hash(password, 10);
+
+  await User.findOneAndUpdate(
+    { email },
+    {
+      $set: {
+        name: "Super Admin",
+        email,
+        passwordHash,
+        userType: "superadmin",
+        authProvider: "local",
+      },
+    },
+    { upsert: true, new: true }
+  );
+
+  console.log(`Superadmin ready (${email})`);
+}
+
+async function seedDefaultTeam() {
+  let team = await Team.findOne({ name: "Default Firm" });
+  if (!team) {
+    const superadmin = await User.findOne({ userType: "superadmin" });
+    team = await Team.create({
+      name: "Default Firm",
+      active: true,
+      createdBy: superadmin?._id,
+    });
+    console.log("Seeded default law firm team");
+  }
+
+  const updated = await backfillUsageTeamIds();
+  if (updated > 0) {
+    console.log(`Backfilled teamId on ${updated} token usage rows`);
+  }
 }
 
 async function seedSajiloKanunDemoAccount() {
@@ -326,6 +362,10 @@ async function seedSajiloKanunDemoAccount() {
     .toLowerCase();
   const passwordHash = await bcrypt.hash(password, 10);
 
+  const team =
+    (await Team.findOne({ name: "Default Firm" })) ??
+    (await Team.create({ name: "Default Firm", active: true }));
+
   await SajiloKanunAccount.findOneAndUpdate(
     { username },
     {
@@ -334,6 +374,8 @@ async function seedSajiloKanunDemoAccount() {
         name: "Demo User",
         email,
         active: true,
+        teamId: team._id,
+        role: "admin",
       },
     },
     { upsert: true }

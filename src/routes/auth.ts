@@ -24,7 +24,10 @@ router.post("/login", async (req, res) => {
       return;
     }
 
-    const user = await User.findOne({ email: email.toLowerCase(), userType: "admin" });
+    const user = await User.findOne({
+      email: email.toLowerCase(),
+      userType: { $in: ["admin", "superadmin"] },
+    });
     if (!user?.passwordHash) {
       res.status(401).json({ error: "Invalid email or password" });
       return;

@@ -5,12 +5,12 @@ import { AdvocateProfile, advocateToJson } from "../models/AdvocateProfile";
 import { ConsultationRequest, consultationToJson } from "../models/ConsultationRequest";
 import { ConsultationEventLog, eventLogToJson } from "../models/ConsultationEventLog";
 import { Payment } from "../models/Payment";
-import { requireAuth, requireUserType, type AuthRequest } from "../middleware/auth";
+import { requireAuth, requireAdminPanel, type AuthRequest } from "../middleware/auth";
 import { logConsultationEvent } from "../services/consultationEvents";
 
 const router = Router();
 
-router.use(requireAuth, requireUserType("admin"));
+router.use(requireAuth, requireAdminPanel);
 
 router.get("/advocates/pending", async (_req, res) => {
   try {
