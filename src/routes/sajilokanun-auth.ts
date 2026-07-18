@@ -14,7 +14,7 @@ import {
 } from "../models/LegalCase";
 import {
   requireSajiloKanunAuth,
-  requireSkRole,
+  requireSkPermission,
   requireSkTeamMember,
   signSajiloKanunToken,
   type SajiloKanunAuthRequest,
@@ -33,6 +33,11 @@ import {
   getTeamUsageSummary,
   type UsageRequestMeta,
 } from "../services/sajilokanun-usage";
+import { hasRolePermission } from "../services/role-policies";
+import {
+  getIndividualDailyQuota,
+  reserveIndividualDailyQuery,
+} from "../services/sajilokanun-quota";
 
 const router = Router();
 
@@ -82,6 +87,79 @@ router.post("/login", async (req, res) => {
   }
 });
 
+router.get(
+  "/authorize/chat",
+  requireSajiloKanunAuth,
+  requireSkPermission("sk.chat.use"),
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const user = req.sajiloKanunUser!;
+      if (user.teamId || user.role) {
+        res.json({ allowed: true, quota: null });
+        return;
+      }
+      if (req.query.consume !== "1") {
+        res.json({
+          allowed: true,
+          quota: await getIndividualDailyQuota(user.id),
+        });
+        return;
+      }
+
+      const rawQuestionId = req.query.questionId;
+      const questionId = Array.isArray(rawQuestionId)
+        ? rawQuestionId[0]
+        : rawQuestionId;
+      const rawQuestionHash = req.query.questionHash;
+      const questionHash = Array.isArray(rawQuestionHash)
+        ? rawQuestionHash[0]
+        : rawQuestionHash;
+      const quota = await reserveIndividualDailyQuery(
+        user.id,
+        typeof questionId === "string" ? questionId : "",
+        typeof questionHash === "string" ? questionHash : ""
+      );
+      if (!quota.allowed) {
+        const status =
+          quota.reason === "question_identity_required" ? 400 : 429;
+        res.status(status).json({
+          error:
+            status === 429
+              ? "Your free query for today has been used. Try again after the daily reset."
+              : "A valid question identity is required.",
+          quota,
+        });
+        return;
+      }
+      res.json({ allowed: true, quota });
+    } catch (err) {
+      console.error("Sajilo Kanun authorization error:", err);
+      res.status(500).json({ error: "Failed to verify query allowance" });
+    }
+  }
+);
+
+router.get(
+  "/quota",
+  requireSajiloKanunAuth,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const user = req.sajiloKanunUser!;
+      if (user.teamId || user.role) {
+        res.json({ quota: null, plan: "firm" });
+        return;
+      }
+      res.json({
+        quota: await getIndividualDailyQuota(user.id),
+        plan: "individual",
+      });
+    } catch (err) {
+      console.error("Sajilo Kanun quota error:", err);
+      res.status(500).json({ error: "Failed to load query allowance" });
+    }
+  }
+);
+
 router.get("/me", requireSajiloKanunAuth, async (req: SajiloKanunAuthRequest, res) => {
   try {
     const account = await SajiloKanunAccount.findById(req.sajiloKanunUser!.id);
@@ -109,9 +187,22 @@ router.get("/me", requireSajiloKanunAuth, async (req: SajiloKanunAuthRequest, re
 router.get("/usage", requireSajiloKanunAuth, async (req: SajiloKanunAuthRequest, res) => {
   try {
     const user = req.sajiloKanunUser!;
-    if (user.role === "admin" && user.teamId) {
+    const roleKey =
+      user.role === "admin"
+        ? "sk.firm_admin"
+        : user.role === "member"
+          ? "sk.member"
+          : "sk.individual";
+    if (
+      user.teamId &&
+      (await hasRolePermission(roleKey, "sk.usage.read_team"))
+    ) {
       const usage = await getTeamUsageSummary(user.teamId);
       res.json({ usage, scope: "team" });
+      return;
+    }
+    if (!(await hasRolePermission(roleKey, "sk.usage.read_self"))) {
+      res.status(403).json({ error: "Permission denied" });
       return;
     }
     const usage = await getSajiloKanunUsageSummary(user.id);
@@ -128,9 +219,22 @@ router.get("/usage/log", requireSajiloKanunAuth, async (req: SajiloKanunAuthRequ
     const offset = Number(req.query.offset ?? 0);
     const user = req.sajiloKanunUser!;
 
-    if (user.role === "admin" && user.teamId) {
+    const roleKey =
+      user.role === "admin"
+        ? "sk.firm_admin"
+        : user.role === "member"
+          ? "sk.member"
+          : "sk.individual";
+    if (
+      user.teamId &&
+      (await hasRolePermission(roleKey, "sk.usage.read_team"))
+    ) {
       const log = await getTeamUsageLog(user.teamId, { limit, offset });
       res.json({ ...log, scope: "team" });
+      return;
+    }
+    if (!(await hasRolePermission(roleKey, "sk.usage.read_self"))) {
+      res.status(403).json({ error: "Permission denied" });
       return;
     }
 
@@ -171,7 +275,7 @@ router.post("/usage", requireSajiloKanunAuth, async (req: SajiloKanunAuthRequest
 router.get(
   "/team/members",
   requireSajiloKanunAuth,
-  requireSkRole("admin"),
+  requireSkPermission("sk.members.manage"),
   async (req: SajiloKanunAuthRequest, res) => {
     try {
       const accounts = await SajiloKanunAccount.find({
@@ -188,14 +292,15 @@ router.get(
 router.post(
   "/team/members",
   requireSajiloKanunAuth,
-  requireSkRole("admin"),
+  requireSkPermission("sk.members.manage"),
   async (req: SajiloKanunAuthRequest, res) => {
     try {
-      const { username, password, name, email } = req.body as {
+      const { username, password, name, email, contactNo } = req.body as {
         username?: string;
         password?: string;
         name?: string;
         email?: string;
+        contactNo?: string;
       };
 
       if (!username?.trim() || !password || !name?.trim()) {
@@ -209,6 +314,7 @@ router.post(
         password,
         name,
         email,
+        contactNo,
         role: "member",
         createdBy: req.sajiloKanunUser!.id,
       });
@@ -226,7 +332,7 @@ router.post(
 router.patch(
   "/team/members/:id",
   requireSajiloKanunAuth,
-  requireSkRole("admin"),
+  requireSkPermission("sk.members.manage"),
   async (req: SajiloKanunAuthRequest, res) => {
     try {
       const account = await SajiloKanunAccount.findOne({
@@ -255,7 +361,7 @@ router.patch(
 router.get(
   "/team/usage",
   requireSajiloKanunAuth,
-  requireSkRole("admin"),
+  requireSkPermission("sk.usage.read_team"),
   async (req: SajiloKanunAuthRequest, res) => {
     try {
       const limit = Number(req.query.limit ?? 30);
@@ -291,8 +397,22 @@ router.get(
     try {
       const user = req.sajiloKanunUser!;
       const filter: Record<string, unknown> = { teamId: user.teamId };
-
-      if (user.role === "member") {
+      const roleKey =
+        user.role === "admin"
+          ? "sk.firm_admin"
+          : user.role === "member"
+            ? "sk.member"
+            : "sk.individual";
+      const canReadAll = await hasRolePermission(roleKey, "sk.cases.read_all");
+      const canReadAssigned = await hasRolePermission(
+        roleKey,
+        "sk.cases.read_assigned"
+      );
+      if (!canReadAll && !canReadAssigned) {
+        res.status(403).json({ error: "Permission denied" });
+        return;
+      }
+      if (!canReadAll) {
         filter.assignedMemberIds = new mongoose.Types.ObjectId(user.id);
       }
 
@@ -308,7 +428,7 @@ router.get(
 router.post(
   "/cases",
   requireSajiloKanunAuth,
-  requireSkRole("admin"),
+  requireSkPermission("sk.cases.manage"),
   async (req: SajiloKanunAuthRequest, res) => {
     try {
       const { title, caseNo, type, status, notes, assignedMemberIds } = req.body as {
@@ -358,7 +478,7 @@ router.post(
 router.patch(
   "/cases/:id",
   requireSajiloKanunAuth,
-  requireSkRole("admin"),
+  requireSkPermission("sk.cases.manage"),
   async (req: SajiloKanunAuthRequest, res) => {
     try {
       const legalCase = await LegalCase.findOne({

@@ -3,7 +3,10 @@ import { Term, termToJson } from "../models/Term";
 import { Template, templateToJson } from "../models/Template";
 import { CategoryCard, categoryToJson } from "../models/CategoryCard";
 import { QuickTag } from "../models/QuickTag";
-import { requireAuth, requireUserType } from "../middleware/auth";
+import {
+  requireAuth,
+  requirePlatformPermission,
+} from "../middleware/auth";
 import type { Category, Status } from "../types";
 
 const router = Router();
@@ -53,7 +56,11 @@ router.get("/terms/:id", async (req, res) => {
   res.json(termToJson(term));
 });
 
-router.post("/terms", requireAuth, requireUserType("admin"), async (req, res) => {
+router.post(
+  "/terms",
+  requireAuth,
+  requirePlatformPermission("platform.content.manage"),
+  async (req, res) => {
   const { name, category, definition, status } = req.body as {
     name?: { en: string; ne?: string };
     category?: Category;
@@ -88,7 +95,8 @@ router.post("/terms", requireAuth, requireUserType("admin"), async (req, res) =>
   });
 
   res.status(201).json(termToJson(term));
-});
+  }
+);
 
 router.get("/templates", async (req, res) => {
   const { category, status, search, fileType } = req.query;
@@ -119,7 +127,11 @@ router.get("/templates/:slug", async (req, res) => {
   res.json(templateToJson(doc));
 });
 
-router.post("/templates", requireAuth, requireUserType("admin"), async (req, res) => {
+router.post(
+  "/templates",
+  requireAuth,
+  requirePlatformPermission("platform.content.manage"),
+  async (req, res) => {
   const { name, description, category, fileName, fileType, status } = req.body as {
     name?: { en: string; ne: string };
     description?: { en: string; ne: string };
@@ -178,7 +190,8 @@ router.post("/templates", requireAuth, requireUserType("admin"), async (req, res
   });
 
   res.status(201).json(templateToJson(tmpl));
-});
+  }
+);
 
 router.get("/categories", async (_req, res) => {
   const docs = await CategoryCard.find().sort({ sortOrder: 1 });

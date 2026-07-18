@@ -7,10 +7,12 @@ export interface ISajiloKanunAccount extends Document {
   passwordHash: string;
   name: string;
   email?: string;
+  contactNo?: string;
   active: boolean;
   teamId?: Types.ObjectId;
   role?: SajiloKanunAccountRole;
   createdBy?: Types.ObjectId;
+  platformUserId?: Types.ObjectId;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -21,10 +23,18 @@ const accountSchema = new Schema<ISajiloKanunAccount>(
     passwordHash: { type: String, required: true },
     name: { type: String, required: true, trim: true, maxlength: 120 },
     email: { type: String, trim: true, lowercase: true, maxlength: 200 },
+    contactNo: { type: String, trim: true, maxlength: 30 },
     active: { type: Boolean, default: true },
     teamId: { type: Schema.Types.ObjectId, ref: "Team", index: true },
     role: { type: String, enum: ["admin", "member"] },
     createdBy: { type: Schema.Types.ObjectId },
+    platformUserId: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      unique: true,
+      sparse: true,
+      index: true,
+    },
   },
   { timestamps: true }
 );
@@ -42,9 +52,12 @@ export function sajiloKanunAccountToJson(account: ISajiloKanunAccount) {
     username: account.username,
     name: account.name,
     email: account.email ?? "",
+    contactNo: account.contactNo ?? "",
     active: account.active,
     teamId: account.teamId?.toString() ?? null,
     role: account.role ?? null,
+    userType: account.role === "admin" ? "Firm admin" : account.role === "member" ? "Member" : null,
     createdAt: account.createdAt.toISOString(),
+    createdBy: account.createdBy?.toString() ?? null,
   };
 }

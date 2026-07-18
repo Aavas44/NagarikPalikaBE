@@ -20,6 +20,7 @@ export async function createTeamAccount(params: {
   password: string;
   name: string;
   email?: string;
+  contactNo?: string;
   role: SajiloKanunAccountRole;
   createdBy?: string;
 }): Promise<ISajiloKanunAccount> {
@@ -40,6 +41,7 @@ export async function createTeamAccount(params: {
     passwordHash,
     name: params.name.trim(),
     email: params.email?.trim().toLowerCase(),
+    contactNo: params.contactNo?.trim() || undefined,
     active: true,
     teamId: team._id,
     role: params.role,

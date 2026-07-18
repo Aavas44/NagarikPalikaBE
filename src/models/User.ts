@@ -10,6 +10,8 @@ export interface IUser extends Document {
   googleId?: string;
   avatarUrl?: string;
   phone?: string;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 const userSchema = new Schema<IUser>(
@@ -40,5 +42,6 @@ export function userToJson(user: IUser) {
     userType: user.userType,
     avatarUrl: user.avatarUrl,
     phone: user.phone,
+    createdAt: user.createdAt?.toISOString?.() ?? undefined,
   };
 }

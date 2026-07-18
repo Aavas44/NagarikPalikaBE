@@ -1,6 +1,10 @@
 import type { Request, Response, NextFunction } from "express";
 import jwt from "jsonwebtoken";
 import type { AuthUser, UserType } from "../types";
+import {
+  hasRolePermission,
+  type RolePermissionKey,
+} from "../services/role-policies";
 
 const JWT_SECRET = process.env.JWT_SECRET ?? "nagarik-palika-dev-secret-change-in-production";
 
@@ -90,6 +94,29 @@ export function requireAdminPanel(req: AuthRequest, res: Response, next: NextFun
     return;
   }
   next();
+}
+
+export function requirePlatformPermission(permission: RolePermissionKey) {
+  return async (req: AuthRequest, res: Response, next: NextFunction) => {
+    if (!req.user) {
+      res.status(401).json({ error: "Authentication required" });
+      return;
+    }
+    if (req.user.userType !== "admin" && req.user.userType !== "superadmin") {
+      res.status(403).json({ error: "Insufficient permissions" });
+      return;
+    }
+
+    const roleKey =
+      req.user.userType === "superadmin"
+        ? "platform.superadmin"
+        : "platform.admin";
+    if (!(await hasRolePermission(roleKey, permission))) {
+      res.status(403).json({ error: "Permission denied" });
+      return;
+    }
+    next();
+  };
 }
 
 export { JWT_SECRET };

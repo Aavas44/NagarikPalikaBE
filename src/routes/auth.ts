@@ -1,6 +1,6 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
-import { User, userToJson } from "../models/User";
+import { User, userToJson, type IUser } from "../models/User";
 import {
   requireAuth,
   signToken,
@@ -11,9 +11,38 @@ import {
   getGoogleAuthUrl,
 } from "../services/payments";
 import { AdvocateProfile, advocateToJson } from "../models/AdvocateProfile";
+import {
+  signSajiloKanunToken,
+} from "../middleware/sajilokanun-auth";
+import {
+  accountToAuthUser,
+} from "../services/team-accounts";
+import { provisionIndividualSajiloAccount } from "../services/individual-accounts";
 
 const router = Router();
 const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:3000";
+
+async function createCitizenSession(
+  user: IUser,
+  passwordHash?: string
+) {
+  const account = await provisionIndividualSajiloAccount({
+    platformUserId: user._id.toString(),
+    name: user.name,
+    email: user.email,
+    passwordHash,
+  });
+  return {
+    token: signToken({
+      id: user._id.toString(),
+      email: user.email,
+      name: user.name,
+      userType: user.userType,
+    }),
+    sajiloKanunToken: signSajiloKanunToken(accountToAuthUser(account)),
+    user: userToJson(user),
+  };
+}
 
 router.post("/login", async (req, res) => {
   try {
@@ -53,10 +82,75 @@ router.post("/login", async (req, res) => {
   }
 });
 
+router.post("/user/register", async (req, res) => {
+  try {
+    const { name, email, password } = req.body as {
+      name?: string;
+      email?: string;
+      password?: string;
+    };
+    const normalizedEmail = email?.trim().toLowerCase();
+    if (!name?.trim() || !normalizedEmail || !password) {
+      res.status(400).json({ error: "Name, email, and password are required" });
+      return;
+    }
+    if (password.length < 8) {
+      res.status(400).json({ error: "Password must be at least 8 characters" });
+      return;
+    }
+    if (await User.exists({ email: normalizedEmail })) {
+      res.status(409).json({
+        error: "An account with this email already exists. Sign in instead.",
+      });
+      return;
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    const user = await User.create({
+      name: name.trim(),
+      email: normalizedEmail,
+      passwordHash,
+      authProvider: "local",
+      userType: "user",
+    });
+    res.status(201).json(await createCitizenSession(user, passwordHash));
+  } catch (err) {
+    console.error("Citizen registration error:", err);
+    res.status(500).json({ error: "Registration failed" });
+  }
+});
+
+router.post("/user/login", async (req, res) => {
+  try {
+    const { email, password } = req.body as {
+      email?: string;
+      password?: string;
+    };
+    const normalizedEmail = email?.trim().toLowerCase();
+    if (!normalizedEmail || !password) {
+      res.status(400).json({ error: "Email and password are required" });
+      return;
+    }
+
+    const user = await User.findOne({
+      email: normalizedEmail,
+      userType: "user",
+    });
+    if (!user?.passwordHash || !(await bcrypt.compare(password, user.passwordHash))) {
+      res.status(401).json({ error: "Invalid email or password" });
+      return;
+    }
+    res.json(await createCitizenSession(user, user.passwordHash));
+  } catch (err) {
+    console.error("Citizen login error:", err);
+    res.status(500).json({ error: "Login failed" });
+  }
+});
+
 router.get("/google", (_req, res) => {
   const url = getGoogleAuthUrl();
   if (!url) {
-    res.status(503).json({ error: "Google OAuth not configured" });
+    res.redirect(`${FRONTEND_URL}/login?error=google_not_configured`);
     return;
   }
   res.redirect(url);
@@ -81,7 +175,10 @@ router.get("/google/callback", async (req, res) => {
       return;
     }
 
-    if (existing?.userType === "admin") {
+    if (
+      existing?.userType === "admin" ||
+      existing?.userType === "superadmin"
+    ) {
       res.redirect(`${FRONTEND_URL}/login?error=use_admin_login`);
       return;
     }
@@ -103,15 +200,10 @@ router.get("/google/callback", async (req, res) => {
       await user.save();
     }
 
-    const token = signToken({
-      id: user._id.toString(),
-      email: user.email,
-      name: user.name,
-      userType: user.userType,
-    });
+    const session = await createCitizenSession(user);
 
     res.redirect(
-      `${FRONTEND_URL}/auth/callback?token=${encodeURIComponent(token)}&redirect=${encodeURIComponent("/account")}`
+      `${FRONTEND_URL}/auth/callback?token=${encodeURIComponent(session.token)}&sajiloToken=${encodeURIComponent(session.sajiloKanunToken)}&redirect=${encodeURIComponent("/sajilokanun/chat")}`
     );
   } catch (err) {
     console.error("Google callback error:", err);

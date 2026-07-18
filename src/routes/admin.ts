@@ -5,12 +5,19 @@ import { AdvocateProfile, advocateToJson } from "../models/AdvocateProfile";
 import { ConsultationRequest, consultationToJson } from "../models/ConsultationRequest";
 import { ConsultationEventLog, eventLogToJson } from "../models/ConsultationEventLog";
 import { Payment } from "../models/Payment";
-import { requireAuth, requireAdminPanel, type AuthRequest } from "../middleware/auth";
+import {
+  requireAuth,
+  requirePlatformPermission,
+  type AuthRequest,
+} from "../middleware/auth";
 import { logConsultationEvent } from "../services/consultationEvents";
 
 const router = Router();
 
-router.use(requireAuth, requireAdminPanel);
+router.use(
+  requireAuth,
+  requirePlatformPermission("platform.feedback.manage")
+);
 
 router.get("/advocates/pending", async (_req, res) => {
   try {

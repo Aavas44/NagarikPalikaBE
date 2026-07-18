@@ -1,6 +1,9 @@
 import { Router } from "express";
 import { Lawyer, lawyerToJson } from "../models/Lawyer";
-import { requireAuth, requireUserType } from "../middleware/auth";
+import {
+  requireAuth,
+  requirePlatformPermission,
+} from "../middleware/auth";
 import type { Status } from "../types";
 
 const router = Router();
@@ -26,7 +29,11 @@ router.get("/", async (req, res) => {
   res.json(docs.map(lawyerToJson));
 });
 
-router.post("/", requireAuth, requireUserType("admin"), async (req, res) => {
+router.post(
+  "/",
+  requireAuth,
+  requirePlatformPermission("platform.content.manage"),
+  async (req, res) => {
   const { firmName, lawyerName, officeLocation, rating, ratingCount, status } =
     req.body as {
       firmName?: { en: string; ne?: string };
@@ -80,15 +87,21 @@ router.post("/", requireAuth, requireUserType("admin"), async (req, res) => {
   });
 
   res.status(201).json(lawyerToJson(lawyer));
-});
+  }
+);
 
-router.delete("/:id", requireAuth, requireUserType("admin"), async (req, res) => {
+router.delete(
+  "/:id",
+  requireAuth,
+  requirePlatformPermission("platform.content.manage"),
+  async (req, res) => {
   const lawyer = await Lawyer.findOneAndDelete({ slug: req.params.id });
   if (!lawyer) {
     res.status(404).json({ error: "Lawyer not found" });
     return;
   }
   res.json({ success: true });
-});
+  }
+);
 
 export default router;
