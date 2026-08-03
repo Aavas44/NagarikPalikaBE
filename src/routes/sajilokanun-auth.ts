@@ -1685,19 +1685,10 @@ router.get(
         };
       });
 
-      // Pending-first report: overdue + today + future, soonest dates first.
-      // Keep past/overdue at top for action, then today, then upcoming.
-      const urgencyRank: Record<string, number> = {
-        overdue: 0,
-        today: 1,
-        week: 2,
-        upcoming: 3,
-      };
-      rows.sort((a, b) => {
-        const rankDiff = (urgencyRank[a.urgency] ?? 9) - (urgencyRank[b.urgency] ?? 9);
-        if (rankDiff !== 0) return rankDiff;
-        return +new Date(a.activityDate) - +new Date(b.activityDate);
-      });
+      // Soonest remaining first (fewest days left / most overdue at top).
+      rows.sort(
+        (a, b) => +new Date(a.activityDate) - +new Date(b.activityDate)
+      );
 
       const openCases = cases.filter((legalCase) => legalCase.status !== "closed").length;
 
