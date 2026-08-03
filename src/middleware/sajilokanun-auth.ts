@@ -4,6 +4,7 @@ import { JWT_SECRET } from "./auth";
 import type { SajiloKanunAccountRole } from "../types";
 import { SajiloKanunAccount } from "../models/SajiloKanunAccount";
 import { Team } from "../models/Team";
+import { CaseParticipant } from "../models/CaseParticipant";
 import {
   hasRolePermission,
   type RolePermissionKey,
@@ -82,7 +83,7 @@ export async function requireSajiloKanunAuth(
 
   try {
     const account = await SajiloKanunAccount.findById(user.id).select(
-      "username name active teamId role"
+      "username name active teamId role platformUserId"
     );
     if (!account?.active) {
       res.status(401).json({ error: "Sajilo Kanun account is inactive" });
@@ -97,12 +98,25 @@ export async function requireSajiloKanunAuth(
       }
     }
 
+    let role = account.role ?? null;
+    if (!role && !account.teamId && !account.platformUserId) {
+      const linkedToCase = await CaseParticipant.exists({
+        accountId: account._id,
+        status: "active",
+      });
+      if (linkedToCase) {
+        account.role = "caseUser";
+        await account.save();
+        role = "caseUser";
+      }
+    }
+
     req.sajiloKanunUser = {
       id: account._id.toString(),
       username: account.username,
       name: account.name,
       teamId: account.teamId?.toString() ?? null,
-      role: account.role ?? null,
+      role,
     };
     next();
   } catch {
@@ -139,7 +153,7 @@ export function requireSkPermission(permission: RolePermissionKey) {
       res.status(401).json({ error: "Sajilo Kanun access required" });
       return;
     }
-    if (!user.teamId && permission !== "sk.chat.use") {
+    if (!user.teamId && user.role !== "caseUser" && permission !== "sk.chat.use") {
       res.status(403).json({ error: "No firm assigned" });
       return;
     }
@@ -149,7 +163,9 @@ export function requireSkPermission(permission: RolePermissionKey) {
         ? "sk.firm_admin"
         : user.role === "member"
           ? "sk.member"
-          : "sk.individual";
+          : user.role === "caseUser"
+            ? "sk.case_user"
+            : "sk.individual";
     if (!(await hasRolePermission(roleKey, permission))) {
       res.status(403).json({ error: "Permission denied" });
       return;

@@ -11,6 +11,7 @@ import consultationsRouter from "./routes/consultations";
 import paymentsRouter from "./routes/payments";
 import adminRouter from "./routes/admin";
 import adminTeamsRouter from "./routes/admin-teams";
+import adminGeminiKeysRouter from "./routes/admin-gemini-keys";
 import feedbackRouter from "./routes/feedback";
 import demoRequestsRouter from "./routes/demo-requests";
 import sajilokanunAuthRouter from "./routes/sajilokanun-auth";
@@ -33,6 +34,8 @@ app.use("/api/lawyers", lawyersRouter);
 app.use("/api/advocates", advocatesRouter);
 app.use("/api/consultations", consultationsRouter);
 app.use("/api/payments", paymentsRouter);
+// Must mount before adminRouter / adminTeamsRouter (those apply requireAuth to all /api/admin/*).
+app.use("/api/admin", adminGeminiKeysRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/admin", adminTeamsRouter);
 app.use("/api/feedback", feedbackRouter);

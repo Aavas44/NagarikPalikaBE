@@ -5,6 +5,8 @@ import { Team, teamToJson } from "../models/Team";
 import { SajiloKanunAccount } from "../models/SajiloKanunAccount";
 import { RolePolicy } from "../models/RolePolicy";
 import { User, userToJson } from "../models/User";
+import { CaseParticipant } from "../models/CaseParticipant";
+import { LegalCase } from "../models/LegalCase";
 import {
   requireAuth,
   requirePlatformPermission,
@@ -26,12 +28,25 @@ const router = Router();
 
 router.use(requireAuth);
 
-type DirectoryUserType = "superadmin" | "admin" | "firm_admin" | "member";
+type DirectoryUserType =
+  | "superadmin"
+  | "admin"
+  | "firm_admin"
+  | "member"
+  | "case_user";
 
 function platformUserTypeLabel(userType: UserType): string {
   if (userType === "superadmin") return "Superadmin";
   if (userType === "admin") return "Admin";
   return userType;
+}
+
+function firmDirectoryUserType(
+  role: SajiloKanunAccountRole | null | undefined
+): DirectoryUserType {
+  if (role === "admin") return "firm_admin";
+  if (role === "caseUser") return "case_user";
+  return "member";
 }
 
 router.get("/role-policies", requireSuperadmin, async (_req, res) => {
@@ -83,9 +98,15 @@ router.patch(
 router.get(
   "/teams",
   requirePlatformPermission("platform.firms.manage"),
-  async (_req, res) => {
+  async (req, res) => {
   try {
-    const teams = await Team.find().sort({ createdAt: -1 });
+    const search =
+      typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const filter =
+      search.length > 0
+        ? { name: { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" } }
+        : {};
+    const teams = await Team.find(filter).sort({ name: 1 }).limit(search ? 40 : 200);
     const teamsWithCounts = await Promise.all(
       teams.map(async (team) => {
         const memberCount = await SajiloKanunAccount.countDocuments({ teamId: team._id });
@@ -193,14 +214,78 @@ router.get(
       firmName: account.firmName,
       role: account.role,
       userType: account.userType,
-      directoryUserType:
-        account.role === "admin"
-          ? ("firm_admin" as DirectoryUserType)
-          : ("member" as DirectoryUserType),
+      directoryUserType: firmDirectoryUserType(account.role),
       createdAt: account.createdAt ?? null,
       createdBy: account.createdBy,
       createdByName: account.createdByName,
+      assignedCases: [] as Array<{
+        id: string;
+        title: string;
+        caseNo: string;
+        status: string;
+      }>,
     }));
+
+    try {
+      const caseUserIds = firmRows
+        .filter((row) => row.role === "caseUser")
+        .map((row) => row.id)
+        .filter((id) => mongoose.Types.ObjectId.isValid(id))
+        .map((id) => new mongoose.Types.ObjectId(id));
+
+      if (caseUserIds.length > 0) {
+        const participants = await CaseParticipant.find({
+          accountId: { $in: caseUserIds },
+          status: "active",
+        }).select("accountId caseId");
+
+        const caseIds = [
+          ...new Set(participants.map((p) => p.caseId.toString())),
+        ]
+          .filter((id) => mongoose.Types.ObjectId.isValid(id))
+          .map((id) => new mongoose.Types.ObjectId(id));
+
+        const cases = caseIds.length
+          ? await LegalCase.find({ _id: { $in: caseIds } }).select(
+              "title caseNo status"
+            )
+          : [];
+        const caseById = new Map(
+          cases.map((legalCase) => [
+            legalCase._id.toString(),
+            {
+              id: legalCase._id.toString(),
+              title: legalCase.title,
+              caseNo: legalCase.caseNo,
+              status: String(legalCase.status),
+            },
+          ])
+        );
+
+        const casesByAccount = new Map<
+          string,
+          Array<{ id: string; title: string; caseNo: string; status: string }>
+        >();
+        for (const participant of participants) {
+          const accountId = participant.accountId.toString();
+          const legalCase = caseById.get(participant.caseId.toString());
+          if (!legalCase) continue;
+          const list = casesByAccount.get(accountId) ?? [];
+          if (!list.some((item) => item.id === legalCase.id)) {
+            list.push(legalCase);
+          }
+          casesByAccount.set(accountId, list);
+        }
+
+        for (const row of firmRows) {
+          if (row.role === "caseUser") {
+            row.assignedCases = casesByAccount.get(row.id) ?? [];
+          }
+        }
+      }
+    } catch (caseLookupErr) {
+      console.error("Failed to attach assigned cases to directory:", caseLookupErr);
+    }
 
     const people = [...platformRows, ...firmRows].sort((a, b) => {
       const aTime = a.createdAt ? Date.parse(a.createdAt) : 0;
@@ -345,8 +430,7 @@ router.post(
       firmName: enriched.firmName,
       role: enriched.role,
       userType: enriched.userType,
-      directoryUserType:
-        assignedFirmRole === "admin" ? "firm_admin" : "member",
+      directoryUserType: firmDirectoryUserType(assignedFirmRole),
       createdAt: enriched.createdAt ?? null,
       createdBy: enriched.createdBy,
       createdByName: enriched.createdByName,
@@ -454,23 +538,76 @@ router.patch(
   requirePlatformPermission("platform.members.manage"),
   async (req, res) => {
   try {
-    const { active, role, password, teamId, contactNo } = req.body as {
-      active?: boolean;
-      role?: SajiloKanunAccountRole;
-      password?: string;
-      teamId?: string | null;
-      contactNo?: string;
-    };
+    const existing = await SajiloKanunAccount.findById(req.params.id);
+    if (!existing) {
+      res.status(404).json({ error: "Account not found" });
+      return;
+    }
+
+    const { active, role, password, teamId, contactNo, name, email, username } =
+      req.body as {
+        active?: boolean;
+        role?: SajiloKanunAccountRole;
+        password?: string;
+        teamId?: string | null;
+        contactNo?: string;
+        name?: string;
+        email?: string;
+        username?: string;
+      };
 
     const updates: Record<string, unknown> = {};
     if (typeof active === "boolean") updates.active = active;
-    if (role === "admin" || role === "member") updates.role = role;
-    if (password) updates.passwordHash = await bcrypt.hash(password, 10);
+    if (role === "admin" || role === "member") {
+      if (existing.role === "caseUser") {
+        res.status(400).json({
+          error: "Case users cannot be converted to firm admin or firm member here",
+        });
+        return;
+      }
+      updates.role = role;
+    }
+    if (typeof password === "string" && password.trim()) {
+      updates.passwordHash = await bcrypt.hash(password.trim(), 10);
+    }
     if (typeof contactNo === "string") {
       updates.contactNo = contactNo.trim() || undefined;
     }
+    if (typeof name === "string") {
+      const nextName = name.trim();
+      if (!nextName) {
+        res.status(400).json({ error: "Name is required" });
+        return;
+      }
+      updates.name = nextName.slice(0, 120);
+    }
+    if (typeof email === "string") {
+      updates.email = email.trim().toLowerCase().slice(0, 200) || undefined;
+    }
+    if (typeof username === "string") {
+      const nextUsername = username.trim().toLowerCase();
+      if (!nextUsername) {
+        res.status(400).json({ error: "Username is required" });
+        return;
+      }
+      const clash = await SajiloKanunAccount.findOne({
+        username: nextUsername,
+        _id: { $ne: req.params.id },
+      });
+      if (clash) {
+        res.status(400).json({ error: "Username is already taken" });
+        return;
+      }
+      updates.username = nextUsername;
+    }
 
     if (teamId !== undefined) {
+      if (existing.role === "caseUser") {
+        res.status(400).json({
+          error: "Case user firm is set by their assigned case and cannot be changed",
+        });
+        return;
+      }
       if (teamId === null || teamId === "") {
         res.status(400).json({ error: "Firm is required" });
         return;
@@ -493,6 +630,7 @@ router.patch(
 
     const account = await SajiloKanunAccount.findByIdAndUpdate(req.params.id, updates, {
       new: true,
+      runValidators: true,
     });
     if (!account) {
       res.status(404).json({ error: "Account not found" });

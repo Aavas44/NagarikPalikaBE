@@ -1,6 +1,6 @@
 import mongoose, { Schema, type Document, type Types } from "mongoose";
 
-export type SajiloKanunAccountRole = "admin" | "member";
+export type SajiloKanunAccountRole = "admin" | "member" | "caseUser";
 
 export interface ISajiloKanunAccount extends Document {
   username: string;
@@ -26,7 +26,7 @@ const accountSchema = new Schema<ISajiloKanunAccount>(
     contactNo: { type: String, trim: true, maxlength: 30 },
     active: { type: Boolean, default: true },
     teamId: { type: Schema.Types.ObjectId, ref: "Team", index: true },
-    role: { type: String, enum: ["admin", "member"] },
+    role: { type: String, enum: ["admin", "member", "caseUser"] },
     createdBy: { type: Schema.Types.ObjectId },
     platformUserId: {
       type: Schema.Types.ObjectId,
@@ -47,6 +47,7 @@ export const SajiloKanunAccount = mongoose.model<ISajiloKanunAccount>(
 );
 
 export function sajiloKanunAccountToJson(account: ISajiloKanunAccount) {
+  const role = account.role ?? null;
   return {
     id: account._id.toString(),
     username: account.username,
@@ -55,8 +56,15 @@ export function sajiloKanunAccountToJson(account: ISajiloKanunAccount) {
     contactNo: account.contactNo ?? "",
     active: account.active,
     teamId: account.teamId?.toString() ?? null,
-    role: account.role ?? null,
-    userType: account.role === "admin" ? "Firm admin" : account.role === "member" ? "Member" : null,
+    role,
+    userType:
+      role === "admin"
+        ? "Firm admin"
+        : role === "member"
+          ? "Firm member"
+          : role === "caseUser"
+            ? "Case user"
+            : null,
     createdAt: account.createdAt.toISOString(),
     createdBy: account.createdBy?.toString() ?? null,
   };

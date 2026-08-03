@@ -5,7 +5,8 @@ export type RoleKey =
   | "platform.admin"
   | "sk.firm_admin"
   | "sk.member"
-  | "sk.individual";
+  | "sk.individual"
+  | "sk.case_user";
 
 export interface IRolePolicy extends Document {
   roleKey: RoleKey;
@@ -25,6 +26,7 @@ const rolePolicySchema = new Schema<IRolePolicy>(
         "sk.firm_admin",
         "sk.member",
         "sk.individual",
+        "sk.case_user",
       ],
       required: true,
       unique: true,

@@ -74,6 +74,27 @@ export const ROLE_PERMISSION_CATALOG = [
     description: "View token usage for the current account.",
     roles: ["sk.firm_admin", "sk.member", "sk.individual"],
   },
+  {
+    key: "sk.files.read",
+    label: "View case files",
+    description:
+      "List and download documents on accessible cases. Case users are limited to their linked cases.",
+    roles: ["sk.firm_admin", "sk.member", "sk.case_user"],
+  },
+  {
+    key: "sk.files.upload",
+    label: "Upload case files",
+    description:
+      "Upload documents to accessible cases. Case users may only manage (replace/delete) files they uploaded.",
+    roles: ["sk.firm_admin", "sk.member", "sk.case_user"],
+  },
+  {
+    key: "sk.files.manage",
+    label: "Manage all case files",
+    description:
+      "Delete or manage any document on firm cases (not limited to own uploads). Grant to firm admins or trusted members.",
+    roles: ["sk.firm_admin", "sk.member"],
+  },
 ] as const;
 
 export type RolePermissionKey = (typeof ROLE_PERMISSION_CATALOG)[number]["key"];
@@ -119,6 +140,9 @@ export const ROLE_DEFINITIONS: Array<{
       "sk.cases.manage",
       "sk.members.manage",
       "sk.usage.read_team",
+      "sk.files.read",
+      "sk.files.upload",
+      "sk.files.manage",
     ],
   },
   {
@@ -130,6 +154,8 @@ export const ROLE_DEFINITIONS: Array<{
       "sk.chat.use",
       "sk.cases.read_assigned",
       "sk.usage.read_self",
+      "sk.files.read",
+      "sk.files.upload",
     ],
   },
   {
@@ -138,6 +164,14 @@ export const ROLE_DEFINITIONS: Array<{
     scope: "Sajilo Kanun",
     description: "Legal research access without an assigned law firm.",
     defaultPermissions: ["sk.chat.use", "sk.usage.read_self"],
+  },
+  {
+    key: "sk.case_user",
+    name: "Case user",
+    scope: "Sajilo Kanun",
+    description:
+      "Client access limited to assigned cases, messaging, and own document uploads.",
+    defaultPermissions: ["sk.files.read", "sk.files.upload"],
   },
 ];
 
@@ -173,6 +207,25 @@ export function sanitizeRolePermissions(
     !selected.includes("platform.roles.manage")
   ) {
     selected.push("platform.roles.manage");
+  }
+
+  // Case users always retain read + upload (own-file delete is enforced in routes).
+  if (roleKey === "sk.case_user") {
+    for (const permission of ["sk.files.read", "sk.files.upload"] as const) {
+      if (!selected.includes(permission)) selected.push(permission);
+    }
+  }
+
+  // Older stored policies predate sk.files.* — seed role defaults once.
+  const hasAnyFilePerm = selected.some((permission) =>
+    permission.startsWith("sk.files.")
+  );
+  if (!hasAnyFilePerm) {
+    for (const permission of definition.defaultPermissions) {
+      if (permission.startsWith("sk.files.") && !selected.includes(permission)) {
+        selected.push(permission);
+      }
+    }
   }
 
   return [...new Set(selected)];
