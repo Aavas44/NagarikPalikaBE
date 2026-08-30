@@ -1,7 +1,7 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
 import mongoose from "mongoose";
-import { Team, teamToJson } from "../models/Team";
+import { Team, teamToJson, parseOptionalQuotaLimit } from "../models/Team";
 import { SajiloKanunAccount } from "../models/SajiloKanunAccount";
 import { RolePolicy } from "../models/RolePolicy";
 import { User, userToJson } from "../models/User";
@@ -16,6 +16,7 @@ import {
 import { createTeamAccount } from "../services/team-accounts";
 import { enrichSajiloKanunAccounts } from "../services/sajilokanun-account-enrich";
 import { getTeamUsageLog, getTeamUsageSummary } from "../services/sajilokanun-usage";
+import { getFirmQuotaSnapshot } from "../services/firm-quotas";
 import {
   isRoleKey,
   listRolePolicies,
@@ -109,8 +110,11 @@ router.get(
     const teams = await Team.find(filter).sort({ name: 1 }).limit(search ? 40 : 200);
     const teamsWithCounts = await Promise.all(
       teams.map(async (team) => {
-        const memberCount = await SajiloKanunAccount.countDocuments({ teamId: team._id });
-        return { ...teamToJson(team), memberCount };
+        const [memberCount, firmQuota] = await Promise.all([
+          SajiloKanunAccount.countDocuments({ teamId: team._id }),
+          getFirmQuotaSnapshot(team._id.toString()),
+        ]);
+        return { ...teamToJson(team), memberCount, firmQuota };
       })
     );
     res.json(teamsWithCounts);
@@ -126,9 +130,31 @@ router.post(
   requirePlatformPermission("platform.firms.manage"),
   async (req: AuthRequest, res) => {
   try {
-    const { name } = req.body as { name?: string };
+    const { name, aiRequestsLimit, casesLimit, documentsLimit } = req.body as {
+      name?: string;
+      aiRequestsLimit?: unknown;
+      casesLimit?: unknown;
+      documentsLimit?: unknown;
+    };
     if (!name?.trim()) {
       res.status(400).json({ error: "Firm name is required" });
+      return;
+    }
+
+    let aiLimit: number | null = null;
+    let casesCap: number | null = null;
+    let docsCap: number | null = null;
+    try {
+      const parsedAi = parseOptionalQuotaLimit(aiRequestsLimit);
+      const parsedCases = parseOptionalQuotaLimit(casesLimit);
+      const parsedDocs = parseOptionalQuotaLimit(documentsLimit);
+      if (parsedAi !== undefined) aiLimit = parsedAi;
+      if (parsedCases !== undefined) casesCap = parsedCases;
+      if (parsedDocs !== undefined) docsCap = parsedDocs;
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : "Invalid quota limits",
+      });
       return;
     }
 
@@ -136,8 +162,13 @@ router.post(
       name: name.trim(),
       active: true,
       createdBy: req.user!.id,
+      aiRequestsLimit: aiLimit,
+      casesLimit: casesCap,
+      documentsLimit: docsCap,
+      aiRequestsUsed: 0,
     });
-    res.status(201).json(teamToJson(team));
+    const firmQuota = await getFirmQuotaSnapshot(team._id.toString());
+    res.status(201).json({ ...teamToJson(team), memberCount: 0, firmQuota });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to create firm" });
@@ -150,17 +181,44 @@ router.patch(
   requirePlatformPermission("platform.firms.manage"),
   async (req, res) => {
   try {
-    const { name, active } = req.body as { name?: string; active?: boolean };
+    const { name, active, aiRequestsLimit, casesLimit, documentsLimit } =
+      req.body as {
+        name?: string;
+        active?: boolean;
+        aiRequestsLimit?: unknown;
+        casesLimit?: unknown;
+        documentsLimit?: unknown;
+      };
     const updates: Record<string, unknown> = {};
     if (name?.trim()) updates.name = name.trim();
     if (typeof active === "boolean") updates.active = active;
 
-    const team = await Team.findByIdAndUpdate(req.params.id, updates, { new: true });
+    try {
+      const parsedAi = parseOptionalQuotaLimit(aiRequestsLimit);
+      const parsedCases = parseOptionalQuotaLimit(casesLimit);
+      const parsedDocs = parseOptionalQuotaLimit(documentsLimit);
+      if (parsedAi !== undefined) updates.aiRequestsLimit = parsedAi;
+      if (parsedCases !== undefined) updates.casesLimit = parsedCases;
+      if (parsedDocs !== undefined) updates.documentsLimit = parsedDocs;
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : "Invalid quota limits",
+      });
+      return;
+    }
+
+    const team = await Team.findByIdAndUpdate(req.params.id, updates, {
+      new: true,
+    });
     if (!team) {
       res.status(404).json({ error: "Firm not found" });
       return;
     }
-    res.json(teamToJson(team));
+    const [memberCount, firmQuota] = await Promise.all([
+      SajiloKanunAccount.countDocuments({ teamId: team._id }),
+      getFirmQuotaSnapshot(team._id.toString()),
+    ]);
+    res.json({ ...teamToJson(team), memberCount, firmQuota });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Failed to update firm" });
@@ -659,8 +717,14 @@ router.get(
 
     const limit = Number(req.query.limit ?? 30);
     const offset = Number(req.query.offset ?? 0);
+    const userId =
+      typeof req.query.userId === "string" ? req.query.userId.trim() : "";
     const summary = await getTeamUsageSummary(teamId);
-    const log = await getTeamUsageLog(teamId, { limit, offset });
+    const log = await getTeamUsageLog(teamId, {
+      limit,
+      offset,
+      ...(userId ? { userId } : {}),
+    });
     res.json({ usage: summary, ...log });
   } catch (err) {
     console.error(err);

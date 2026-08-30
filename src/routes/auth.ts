@@ -22,7 +22,7 @@ import { provisionIndividualSajiloAccount } from "../services/individual-account
 const router = Router();
 const FRONTEND_URL = process.env.FRONTEND_URL ?? "http://localhost:3000";
 
-async function createCitizenSession(
+export async function createCitizenSession(
   user: IUser,
   passwordHash?: string
 ) {
@@ -150,7 +150,7 @@ router.post("/user/login", async (req, res) => {
 router.get("/google", (_req, res) => {
   const url = getGoogleAuthUrl();
   if (!url) {
-    res.redirect(`${FRONTEND_URL}/login?error=google_not_configured`);
+    res.redirect(`${FRONTEND_URL}/sajilokanun/login?error=google_not_configured`);
     return;
   }
   res.redirect(url);
@@ -161,7 +161,7 @@ router.get("/google/callback", async (req, res) => {
     const code = req.query.code as string | undefined;
 
     if (!code) {
-      res.redirect(`${FRONTEND_URL}/login?error=oauth_cancelled`);
+      res.redirect(`${FRONTEND_URL}/sajilokanun/login?error=oauth_cancelled`);
       return;
     }
 
@@ -179,7 +179,7 @@ router.get("/google/callback", async (req, res) => {
       existing?.userType === "admin" ||
       existing?.userType === "superadmin"
     ) {
-      res.redirect(`${FRONTEND_URL}/login?error=use_admin_login`);
+      res.redirect(`${FRONTEND_URL}/sajilokanun/login?error=use_admin_login`);
       return;
     }
 
@@ -207,7 +207,7 @@ router.get("/google/callback", async (req, res) => {
     );
   } catch (err) {
     console.error("Google callback error:", err);
-    res.redirect(`${FRONTEND_URL}/login?error=oauth_failed`);
+    res.redirect(`${FRONTEND_URL}/sajilokanun/login?error=oauth_failed`);
   }
 });
 

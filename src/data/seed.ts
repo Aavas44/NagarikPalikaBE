@@ -8,6 +8,7 @@ import { Lawyer } from "../models/Lawyer";
 import { SajiloKanunAccount } from "../models/SajiloKanunAccount";
 import { Team } from "../models/Team";
 import { backfillUsageTeamIds } from "../services/sajilokanun-usage";
+import { seedNepalCourts } from "../services/courts";
 
 const seedTerms = [
   {
@@ -305,6 +306,9 @@ export async function seedDatabase(): Promise<void> {
 
   await seedSajiloKanunDemoAccount();
   await seedDefaultTeam();
+
+  const courtCount = await seedNepalCourts();
+  console.log(`Synced Nepal court catalog (${courtCount} courts)`);
 }
 
 async function seedSuperadmin(): Promise<void> {

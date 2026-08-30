@@ -1,7 +1,16 @@
+import dns from "node:dns";
 import mongoose from "mongoose";
+
+// Node 18–20 + mongodb+srv often fails over IPv6 with an empty AggregateError.
+dns.setDefaultResultOrder("ipv4first");
 
 const MONGODB_URI =
   process.env.MONGODB_URI ?? "mongodb://127.0.0.1:27017/nagarik-palika";
+
+const CONNECT_OPTIONS: mongoose.ConnectOptions = {
+  serverSelectionTimeoutMS: 15_000,
+  family: 4,
+};
 
 let memoryServer: import("mongodb-memory-server").MongoMemoryServer | null = null;
 
@@ -21,22 +30,21 @@ export async function connectDB(): Promise<void> {
     return;
   }
 
-  if (
-    MONGODB_URI.includes("mongodb+srv://") &&
-    /:\/\/[^@]+@[^/]+:\d+/.test(MONGODB_URI)
-  ) {
+  const isAtlas = MONGODB_URI.includes("mongodb+srv://");
+
+  if (isAtlas && /:\/\/[^@]+@[^/]+:\d+/.test(MONGODB_URI)) {
     throw new Error(
       "Invalid MONGODB_URI: mongodb+srv URIs cannot include a port number"
     );
   }
 
   try {
-    await mongoose.connect(MONGODB_URI);
-    console.log("Connected to MongoDB");
+    await mongoose.connect(MONGODB_URI, CONNECT_OPTIONS);
+    console.log(`Connected to MongoDB (${isAtlas ? "Atlas" : "local"})`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
 
-    if (process.env.NODE_ENV === "production") {
+    if (process.env.NODE_ENV === "production" || isAtlas) {
       if (message.includes("bad auth") || message.includes("Authentication failed")) {
         throw new Error("MongoDB authentication failed. Check your Atlas username and password.");
       }

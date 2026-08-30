@@ -11,7 +11,7 @@ import {
 const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 const LOCAL_UPLOAD_ROOT = path.join(process.cwd(), "uploads", "case-files");
 
-/** Document-only uploads (no images/video/audio). */
+/** Case file uploads: documents + common images for extractor / evidence. */
 export const CASE_UPLOAD_ALLOWED_EXTENSIONS = [
   ".pdf",
   ".doc",
@@ -24,6 +24,11 @@ export const CASE_UPLOAD_ALLOWED_EXTENSIONS = [
   ".csv",
   ".ppt",
   ".pptx",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
 ] as const;
 
 const EXTENSION_TO_MIME: Record<string, string> = {
@@ -41,6 +46,11 @@ const EXTENSION_TO_MIME: Record<string, string> = {
   ".ppt": "application/vnd.ms-powerpoint",
   ".pptx":
     "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
 };
 
 const ALLOWED_MIME_TYPES = new Set([
@@ -65,7 +75,7 @@ export function assertAllowedCaseDocument(fileName: string, mimeType?: string) {
     )
   ) {
     throw new Error(
-      "Only document files are allowed (PDF, DOC, DOCX, TXT, RTF, ODT, XLS, XLSX, CSV, PPT, PPTX)"
+      "Only document or image files are allowed (PDF, DOC, DOCX, TXT, RTF, ODT, XLS, XLSX, CSV, PPT, PPTX, PNG, JPG, WEBP, GIF)"
     );
   }
 
@@ -74,10 +84,11 @@ export function assertAllowedCaseDocument(fileName: string, mimeType?: string) {
     normalizedMime &&
     normalizedMime !== "application/octet-stream" &&
     !ALLOWED_MIME_TYPES.has(normalizedMime) &&
-    !normalizedMime.startsWith("text/plain")
+    !normalizedMime.startsWith("text/plain") &&
+    !normalizedMime.startsWith("image/")
   ) {
     throw new Error(
-      "Only document files are allowed (PDF, DOC, DOCX, TXT, RTF, ODT, XLS, XLSX, CSV, PPT, PPTX)"
+      "Only document or image files are allowed (PDF, DOC, DOCX, TXT, RTF, ODT, XLS, XLSX, CSV, PPT, PPTX, PNG, JPG, WEBP, GIF)"
     );
   }
 
@@ -131,7 +142,7 @@ function decodeBase64File(base64Data: string): Buffer {
   return buffer;
 }
 
-function sanitizeFileName(fileName: string): string {
+export function sanitizeFileName(fileName: string): string {
   const safeName = fileName
     .replace(/[^\w.\-()\s\u0900-\u097F]/g, "_")
     .slice(0, 180)
@@ -234,6 +245,49 @@ export async function saveCaseUploadFile(params: {
   return {
     storageKey,
     size: buffer.length,
+    fileName: safeName,
+    mimeType: allowed.mimeType,
+  };
+}
+
+export async function saveCaseUploadBuffer(params: {
+  teamId: string;
+  caseId: string;
+  fileName: string;
+  mimeType: string;
+  buffer: Buffer;
+}): Promise<{ storageKey: string; size: number; fileName: string; mimeType: string }> {
+  if (!params.teamId?.trim() || !params.caseId?.trim()) {
+    throw new Error("Firm and case are required for uploads");
+  }
+  if (!params.buffer.length) {
+    throw new Error("File content is empty");
+  }
+  if (params.buffer.length > MAX_UPLOAD_BYTES) {
+    throw new Error("File exceeds the 10 MB limit");
+  }
+
+  const safeName = sanitizeFileName(params.fileName);
+  const allowed = assertAllowedCaseDocument(safeName, params.mimeType);
+  const storageKey = buildCaseUploadStorageKey({
+    teamId: params.teamId,
+    caseId: params.caseId,
+    fileName: safeName,
+  });
+
+  if (isR2Configured()) {
+    await putR2Object({
+      key: storageKey,
+      body: params.buffer,
+      contentType: allowed.mimeType,
+    });
+  } else {
+    await saveLocalFile(storageKey, params.buffer);
+  }
+
+  return {
+    storageKey,
+    size: params.buffer.length,
     fileName: safeName,
     mimeType: allowed.mimeType,
   };

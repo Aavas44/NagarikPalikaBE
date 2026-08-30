@@ -83,6 +83,19 @@ export function requireSuperadmin(req: AuthRequest, res: Response, next: NextFun
   next();
 }
 
+/** Ward operator portal — document generation only. */
+export function requireWardOperator(req: AuthRequest, res: Response, next: NextFunction) {
+  if (!req.user) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  if (req.user.userType !== "wardOperator") {
+    res.status(403).json({ error: "Ward operator access required" });
+    return;
+  }
+  next();
+}
+
 /** Nagarik Palika admin panel — admin or superadmin. */
 export function requireAdminPanel(req: AuthRequest, res: Response, next: NextFunction) {
   if (!req.user) {

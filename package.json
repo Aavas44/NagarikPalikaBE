@@ -21,16 +21,20 @@
     "@types/node": "^22.10.2",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
+    "docxtemplater": "^3.69.3",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "google-auth-library": "^10.7.0",
     "html-to-docx": "^1.8.0",
     "jsonwebtoken": "^9.0.2",
+    "jszip": "^3.10.1",
     "mongoose": "^8.9.3",
+    "pizzip": "^3.2.0",
     "typescript": "^5.7.2"
   },
   "devDependencies": {
     "@types/html-to-docx": "^1.8.1",
+    "@types/pizzip": "^3.1.2",
     "mongodb-memory-server": "^10.1.4",
     "tsx": "^4.19.2"
   }

@@ -16,6 +16,15 @@ import {
   type LegalCaseType,
 } from "../models/LegalCase";
 import {
+  COURT_TYPE_META,
+  parseCourtType,
+  type CourtType,
+} from "../lib/court-type";
+import {
+  SajiloKanunDocumentTemplate,
+  sajiloKanunDocumentTemplateToJson,
+} from "../models/SajiloKanunDocumentTemplate";
+import {
   CaseParticipant,
   caseParticipantToJson,
 } from "../models/CaseParticipant";
@@ -30,6 +39,17 @@ import {
   caseActivityToJson,
   type CaseActivityType,
 } from "../models/CaseActivity";
+import {
+  CasePesiRow,
+  CASE_PESI_COLUMNS,
+  casePesiRowToJson,
+} from "../models/CasePesiRow";
+import {
+  caseNoMatches,
+  fetchAndMatchCasePesi,
+  fetchCourtWeeklyPesiRows,
+  parseBsDateString,
+} from "../services/supreme-court-pesi";
 import {
   createCaseClientAccount,
   isActiveCaseParticipant,
@@ -48,8 +68,15 @@ import {
   normalizeCaseUploadRename,
   overwriteCaseUploadFile,
   readCaseUploadFile,
+  saveCaseUploadBuffer,
   saveCaseUploadFile,
 } from "../services/case-uploads";
+import {
+  asciiZipFileName,
+  generatedDraftFileName,
+  plaintextToDocxBuffer,
+  zipCaseUploads,
+} from "../services/case-file-export";
 import {
   requireSajiloKanunAuth,
   requireSkPermission,
@@ -76,6 +103,17 @@ import {
   getIndividualDailyQuota,
   reserveIndividualDailyQuery,
 } from "../services/sajilokanun-quota";
+import {
+  assertFirmCanCreateCase,
+  assertFirmCanGenerateDocument,
+  getFirmQuotaSnapshot,
+  reserveFirmAiQuery,
+} from "../services/firm-quotas";
+import { listCourtsGrouped, resolveCourtByIdOrCode } from "../services/courts";
+import { User, userToJson } from "../models/User";
+import { signToken } from "../middleware/auth";
+import { findWardOperatorForLogin } from "../services/ward-operator-auth";
+import { createCitizenSession } from "./auth";
 
 const router = Router();
 
@@ -88,12 +126,81 @@ router.post("/login", async (req, res) => {
       return;
     }
 
+    const identifier = username.trim().toLowerCase();
     const account = await SajiloKanunAccount.findOne({
-      username: username.trim().toLowerCase(),
+      username: identifier,
       active: true,
     });
 
     if (!account) {
+      const platformUser = await User.findOne({
+        email: identifier,
+        userType: { $in: ["admin", "superadmin"] },
+      });
+      if (platformUser?.passwordHash) {
+        const platformValid = await bcrypt.compare(password, platformUser.passwordHash);
+        if (platformValid) {
+          const token = signToken({
+            id: platformUser._id.toString(),
+            email: platformUser.email,
+            name: platformUser.name,
+            userType: platformUser.userType,
+          });
+          res.json({
+            kind: "platform",
+            token,
+            user: userToJson(platformUser),
+            redirect: "/admin",
+          });
+          return;
+        }
+      }
+
+      const wardMatch = await findWardOperatorForLogin(identifier);
+      if (wardMatch?.user.passwordHash) {
+        const wardValid = await bcrypt.compare(password, wardMatch.user.passwordHash);
+        if (wardValid) {
+          if (!wardMatch.profile.active) {
+            res.status(403).json({ error: "This ward operator account is inactive" });
+            return;
+          }
+          const token = signToken({
+            id: wardMatch.user._id.toString(),
+            email: wardMatch.user.email,
+            name: wardMatch.user.name,
+            userType: wardMatch.user.userType,
+          });
+          res.json({
+            kind: "platform",
+            token,
+            user: userToJson(wardMatch.user),
+            redirect: "/ward",
+          });
+          return;
+        }
+      }
+
+      if (identifier.includes("@")) {
+        const citizen = await User.findOne({
+          email: identifier,
+          userType: "user",
+        });
+        if (citizen?.passwordHash) {
+          const citizenValid = await bcrypt.compare(password, citizen.passwordHash);
+          if (citizenValid) {
+            const session = await createCitizenSession(citizen, citizen.passwordHash);
+            res.json({
+              kind: "citizen",
+              token: session.token,
+              sajiloKanunToken: session.sajiloKanunToken,
+              user: session.user,
+              redirect: "/sajilokanun/chat",
+            });
+            return;
+          }
+        }
+      }
+
       res.status(401).json({ error: "Invalid username or password" });
       return;
     }
@@ -116,6 +223,7 @@ router.post("/login", async (req, res) => {
     const token = signSajiloKanunToken(authUser);
 
     res.json({
+      kind: "sajilo_kanun",
       token,
       user: sajiloKanunAccountToJson(account),
     });
@@ -132,6 +240,70 @@ router.get(
   async (req: SajiloKanunAuthRequest, res) => {
     try {
       const user = req.sajiloKanunUser!;
+
+      // Firm users (admin/member) share a firm-level AI pool when a limit is set.
+      if (user.teamId && user.role !== "caseUser") {
+        if (req.query.consume !== "1") {
+          const firmQuota = await getFirmQuotaSnapshot(user.teamId);
+          res.json({
+            allowed: true,
+            quota: firmQuota.aiRequests,
+            firmQuota,
+          });
+          return;
+        }
+
+        const rawQuestionId = req.query.questionId;
+        const questionId = Array.isArray(rawQuestionId)
+          ? rawQuestionId[0]
+          : rawQuestionId;
+        const rawQuestionHash = req.query.questionHash;
+        const questionHash = Array.isArray(rawQuestionHash)
+          ? rawQuestionHash[0]
+          : rawQuestionHash;
+        const quota = await reserveFirmAiQuery(
+          user.teamId,
+          typeof questionId === "string" ? questionId : "",
+          typeof questionHash === "string" ? questionHash : ""
+        );
+        if (!quota.allowed) {
+          const status =
+            quota.reason === "question_identity_required" ? 400 : 429;
+          const firmQuota = await getFirmQuotaSnapshot(user.teamId);
+          res.status(status).json({
+            error:
+              status === 429
+                ? "Your firm has used its allocated AI requests."
+                : "A valid question identity is required.",
+            code: status === 429 ? "firm_ai_quota" : undefined,
+            used: quota.used,
+            limit: quota.limit,
+            quota: {
+              limit: quota.limit,
+              used: quota.used,
+              remaining: quota.remaining,
+              questionId: quota.questionId ?? null,
+            },
+            firmQuota,
+          });
+          return;
+        }
+        const firmQuota = await getFirmQuotaSnapshot(user.teamId);
+        res.json({
+          allowed: true,
+          quota: {
+            limit: quota.limit,
+            used: quota.used,
+            remaining: quota.remaining,
+            questionId: quota.questionId ?? null,
+          },
+          firmQuota,
+        });
+        return;
+      }
+
+      // Case users / roles without firm AI: deny via permission usually;
+      // keep unlimited only when somehow authorized without team.
       if (user.teamId || user.role) {
         res.json({ allowed: true, quota: null });
         return;
@@ -183,6 +355,15 @@ router.get(
   async (req: SajiloKanunAuthRequest, res) => {
     try {
       const user = req.sajiloKanunUser!;
+      if (user.teamId && user.role !== "caseUser") {
+        const firmQuota = await getFirmQuotaSnapshot(user.teamId);
+        res.json({
+          quota: firmQuota.aiRequests,
+          firmQuota,
+          plan: "firm",
+        });
+        return;
+      }
       if (user.teamId || user.role) {
         res.json({ quota: null, plan: "firm" });
         return;
@@ -197,6 +378,17 @@ router.get(
     }
   }
 );
+
+/** Nepal court catalog (special / high / district) for case forms. */
+router.get("/courts", requireSajiloKanunAuth, async (_req, res) => {
+  try {
+    const data = await listCourtsGrouped();
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Failed to load courts" });
+  }
+});
 
 router.get("/me", requireSajiloKanunAuth, async (req: SajiloKanunAuthRequest, res) => {
   try {
@@ -447,7 +639,14 @@ router.get(
       const user = req.sajiloKanunUser!;
       let filter: Record<string, unknown>;
 
-      if (user.teamId) {
+      // Firm admins/members must be scoped to their firm only.
+      if (user.role === "admin" || user.role === "member") {
+        if (!user.teamId) {
+          res.status(403).json({
+            error: "This account is not assigned to a law firm",
+          });
+          return;
+        }
         filter = { teamId: user.teamId };
         const canReadAll = await hasRolePermission(
           skRoleKey(user.role),
@@ -464,7 +663,11 @@ router.get(
         if (!canReadAll) {
           filter.assignedMemberIds = new mongoose.Types.ObjectId(user.id);
         }
+      } else if (user.teamId && user.role !== "caseUser") {
+        // Individual/legacy accounts with a teamId
+        filter = { teamId: user.teamId };
       } else {
+        // Case users (and accounts without a firm): only participant cases
         const caseIds = await listActiveCaseIdsForAccount(user.id);
         filter = {
           _id: { $in: caseIds.map((id) => new mongoose.Types.ObjectId(id)) },
@@ -535,15 +738,36 @@ router.post(
   requireSkPermission("sk.cases.manage"),
   async (req: SajiloKanunAuthRequest, res) => {
     try {
-      const { title, caseNo, type, status, partySide, notes, assignedMemberIds } = req.body as {
-        title?: string;
-        caseNo?: string;
-        type?: string;
-        status?: string;
-        partySide?: string;
-        notes?: string;
-        assignedMemberIds?: string[];
-      };
+      const {
+        title,
+        caseNo,
+        type,
+        status,
+        partySide,
+        notes,
+        assignedMemberIds,
+        courtId,
+        courtCode,
+        courtType: courtTypeRaw,
+        documentExtraction,
+      } =
+        req.body as {
+          title?: string;
+          caseNo?: string;
+          type?: string;
+          status?: string;
+          partySide?: string;
+          notes?: string;
+          assignedMemberIds?: string[];
+          courtId?: string;
+          courtCode?: string;
+          courtType?: string;
+          documentExtraction?: {
+            facts?: unknown;
+            sourceFileNames?: unknown;
+            model?: unknown;
+          };
+        };
 
       const caseType = parseCaseType(type);
       if (!title?.trim() || !caseNo?.trim() || !caseType) {
@@ -551,14 +775,127 @@ router.post(
         return;
       }
 
+      const courtType = parseCourtType(courtTypeRaw);
+      if (!courtType) {
+        res.status(400).json({
+          error:
+            "Court type is required (जिल्ला अदालत / उच्च अदालत / सर्वोच्च अदालत / विशेष अदालत)",
+        });
+        return;
+      }
+
+      const courtMeta = COURT_TYPE_META[courtType];
+      let courtFields: {
+        courtId: mongoose.Types.ObjectId | null;
+        courtCode: string | null;
+        courtName: string;
+        courtNameEn: string | null;
+        courtScDailyId: number | null;
+        courtCategory: "special_courts" | "high_courts" | "district_courts" | null;
+        courtType: CourtType;
+      };
+
+      if (courtType === "supreme") {
+        courtFields = {
+          courtId: null,
+          courtCode: "supreme_court",
+          courtName: courtMeta.defaultCourtNameNe,
+          courtNameEn: courtMeta.defaultCourtNameEn,
+          courtScDailyId: null,
+          courtCategory: null,
+          courtType,
+        };
+      } else {
+        const court = await resolveCourtByIdOrCode({ courtId, courtCode });
+        if (!court) {
+          res.status(400).json({ error: "A valid court is required for this court type" });
+          return;
+        }
+        if (
+          courtMeta.catalogCategory &&
+          court.courtCategory !== courtMeta.catalogCategory
+        ) {
+          res.status(400).json({
+            error: "Selected court does not match the chosen court type",
+          });
+          return;
+        }
+        courtFields = {
+          courtId: new mongoose.Types.ObjectId(court.courtId),
+          courtCode: court.courtCode,
+          courtName: court.courtName,
+          courtNameEn: court.courtNameEn,
+          courtScDailyId: court.courtScDailyId,
+          courtCategory: court.courtCategory,
+          courtType,
+        };
+      }
+
       const caseStatus = parseCaseStatus(status) ?? "open";
       const caseParty = parseCaseParty(partySide) ?? "plaintiff";
       const teamId = req.sajiloKanunUser!.teamId!;
+
+      const caseQuota = await assertFirmCanCreateCase(teamId);
+      if (!caseQuota.allowed) {
+        res.status(429).json({
+          error: caseQuota.error,
+          code: caseQuota.code,
+          used: caseQuota.used,
+          limit: caseQuota.limit,
+          firmQuota: caseQuota.quota,
+        });
+        return;
+      }
 
       const memberIds = await validateAssignedMembers(
         teamId,
         assignedMemberIds ?? []
       );
+
+      let extractionFields: {
+        documentExtraction?: {
+          facts: Record<string, unknown>;
+          sourceFileNames: string[];
+          model: string;
+          updatedBy: mongoose.Types.ObjectId;
+          createdAt: Date;
+          updatedAt: Date;
+        };
+      } = {};
+
+      if (
+        documentExtraction?.facts &&
+        typeof documentExtraction.facts === "object" &&
+        !Array.isArray(documentExtraction.facts)
+      ) {
+        const serialized = JSON.stringify(documentExtraction.facts);
+        if (serialized.length > 200_000) {
+          res.status(400).json({ error: "Extraction payload is too large" });
+          return;
+        }
+        const sourceFileNames = Array.isArray(documentExtraction.sourceFileNames)
+          ? documentExtraction.sourceFileNames
+              .filter((name): name is string => typeof name === "string")
+              .map((name) => name.trim())
+              .filter(Boolean)
+              .slice(0, 20)
+          : [];
+        const model =
+          typeof documentExtraction.model === "string" && documentExtraction.model.trim()
+            ? documentExtraction.model.trim().slice(0, 120)
+            : "";
+        const now = new Date();
+        extractionFields = {
+          documentExtraction: {
+            facts: documentExtraction.facts as Record<string, unknown>,
+            sourceFileNames,
+            model,
+            updatedBy: new mongoose.Types.ObjectId(req.sajiloKanunUser!.id),
+            createdAt: now,
+            updatedAt: now,
+          },
+        };
+      }
 
       const legalCase = await LegalCase.create({
         teamId,
@@ -568,11 +905,13 @@ router.post(
         status: caseStatus,
         partySide: caseParty,
         notes: notes?.trim(),
+        ...courtFields,
         assignedMemberIds: memberIds,
         createdBy: req.sajiloKanunUser!.id,
+        ...extractionFields,
       });
 
-      res.status(201).json(legalCaseToJson(legalCase));
+      res.status(201).json(legalCaseToJson(legalCase, { detail: true }));
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to create case";
       const status = message.includes("duplicate") ? 409 : 400;
@@ -597,7 +936,18 @@ router.patch(
         return;
       }
 
-      const { title, caseNo, type, status, partySide, notes, assignedMemberIds } = req.body as {
+      const {
+        title,
+        caseNo,
+        type,
+        status,
+        partySide,
+        notes,
+        assignedMemberIds,
+        courtId,
+        courtCode,
+        courtType: courtTypeRaw,
+      } = req.body as {
         title?: string;
         caseNo?: string;
         type?: string;
@@ -605,6 +955,9 @@ router.patch(
         partySide?: string;
         notes?: string;
         assignedMemberIds?: string[];
+        courtId?: string | null;
+        courtCode?: string | null;
+        courtType?: string | null;
       };
 
       if (title?.trim()) legalCase.title = title.trim();
@@ -616,6 +969,67 @@ router.patch(
       const caseParty = parseCaseParty(partySide);
       if (caseParty) legalCase.partySide = caseParty;
       if (notes !== undefined) legalCase.notes = notes.trim();
+
+      const nextCourtType =
+        courtTypeRaw === undefined
+          ? legalCase.courtType ?? null
+          : parseCourtType(courtTypeRaw);
+      if (courtTypeRaw !== undefined && !nextCourtType) {
+        res.status(400).json({ error: "Invalid court type" });
+        return;
+      }
+
+      if (courtTypeRaw !== undefined || courtId !== undefined || courtCode !== undefined) {
+        const courtType =
+          nextCourtType ??
+          parseCourtType(legalCase.courtType) ??
+          null;
+        if (!courtType) {
+          res.status(400).json({ error: "Court type is required" });
+          return;
+        }
+        const courtMeta = COURT_TYPE_META[courtType];
+        if (courtType === "supreme") {
+          legalCase.courtId = null;
+          legalCase.courtCode = "supreme_court";
+          legalCase.courtName = courtMeta.defaultCourtNameNe;
+          legalCase.courtNameEn = courtMeta.defaultCourtNameEn;
+          legalCase.courtScDailyId = null;
+          legalCase.courtCategory = null;
+          legalCase.courtType = courtType;
+        } else {
+          const court = await resolveCourtByIdOrCode({
+            courtId:
+              courtId === undefined
+                ? legalCase.courtId?.toString()
+                : courtId,
+            courtCode:
+              courtCode === undefined
+                ? legalCase.courtCode
+                : courtCode,
+          });
+          if (!court) {
+            res.status(400).json({ error: "A valid court is required for this court type" });
+            return;
+          }
+          if (
+            courtMeta.catalogCategory &&
+            court.courtCategory !== courtMeta.catalogCategory
+          ) {
+            res.status(400).json({
+              error: "Selected court does not match the chosen court type",
+            });
+            return;
+          }
+          legalCase.courtId = new mongoose.Types.ObjectId(court.courtId);
+          legalCase.courtCode = court.courtCode;
+          legalCase.courtName = court.courtName;
+          legalCase.courtNameEn = court.courtNameEn;
+          legalCase.courtScDailyId = court.courtScDailyId;
+          legalCase.courtCategory = court.courtCategory;
+          legalCase.courtType = courtType;
+        }
+      }
       if (assignedMemberIds) {
         legalCase.assignedMemberIds = await validateAssignedMembers(
           req.sajiloKanunUser!.teamId!,
@@ -650,6 +1064,21 @@ async function findAccessibleCase(req: SajiloKanunAuthRequest, caseId: string) {
     const isParticipant = await isActiveCaseParticipant(caseId, user.id);
     if (!isParticipant) return null;
     return LegalCase.findById(caseId);
+  }
+
+  // Firm admin/member: always require team scope — never fall through to
+  // participant-only access (that would leak cross-firm if mis-assigned).
+  if (user.role === "admin" || user.role === "member") {
+    if (!user.teamId) return null;
+    const filter: Record<string, unknown> = {
+      _id: caseId,
+      teamId: user.teamId,
+    };
+    const canReadAll = await hasRolePermission(skRoleKey(user.role), "sk.cases.read_all");
+    if (!canReadAll) {
+      filter.assignedMemberIds = new mongoose.Types.ObjectId(user.id);
+    }
+    return LegalCase.findOne(filter);
   }
 
   if (user.teamId) {
@@ -700,12 +1129,296 @@ function parseDocumentKind(value: unknown): LegalCaseDocumentKind | null {
     value === "pratiuttarapatra" ||
     value === "vakalatnama" ||
     value === "warisnama" ||
-    value === "nivedan_awedan"
+    value === "nivedan_awedan" ||
+    value === "adhikrit_warisnama" ||
+    value === "sadharan_warisnama" ||
+    value === "manjurinama" ||
+    value === "sampatti_rokka_nivedan" ||
+    value === "sampatti_fukuwa_nivedan" ||
+    value === "tayari_fatbari_nivedan" ||
+    value === "court_fee_subidha_nivedan" ||
+    value === "milis_jhikaune_nivedan" ||
+    value === "petboli_manish_bhuji_nivedan" ||
+    value === "sakkal_kagaj_pesh_nivedan" ||
+    value === "hajir_huna_aayeko_nivedan"
   ) {
     return value;
   }
   return null;
 }
+
+/** Published official / firm document templates for a court tier. */
+router.get(
+  "/document-templates",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const courtType = parseCourtType(
+        Array.isArray(req.query.courtType)
+          ? req.query.courtType[0]
+          : req.query.courtType
+      );
+      if (!courtType) {
+        res.status(400).json({ error: "A valid courtType is required" });
+        return;
+      }
+
+      const templates = await SajiloKanunDocumentTemplate.find({
+        courtType,
+        status: "published",
+      }).sort({ nameNe: 1, nameEn: 1, documentKind: 1 });
+
+      res.json(templates.map(sajiloKanunDocumentTemplateToJson));
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to list document templates" });
+    }
+  }
+);
+
+router.get(
+  "/document-templates/:id/fields",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const id = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const template = await SajiloKanunDocumentTemplate.findOne({
+        _id: id,
+        status: "published",
+      });
+      if (!template) {
+        res.status(404).json({ error: "Published template not found" });
+        return;
+      }
+      const {
+        getSkTemplateFormFields,
+      } = await import("../services/sk-document-generation");
+      res.json(await getSkTemplateFormFields(template));
+    } catch (err) {
+      console.error(err);
+      res.status(400).json({
+        error:
+          err instanceof Error ? err.message : "Failed to load template fields",
+      });
+    }
+  }
+);
+
+async function loadPublishedSkTemplate(templateId: string) {
+  return SajiloKanunDocumentTemplate.findOne({
+    _id: templateId,
+    status: "published",
+  });
+}
+
+router.post(
+  "/cases/:id/document-templates/preview",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const legalCase = await findAccessibleCase(req, caseId);
+      if (!legalCase) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
+
+      const { templateId, variables } = req.body as {
+        templateId?: string;
+        variables?: Record<string, string | number>;
+      };
+      if (!templateId?.trim()) {
+        res.status(400).json({ error: "templateId is required" });
+        return;
+      }
+
+      const template = await loadPublishedSkTemplate(templateId);
+      if (!template) {
+        res.status(404).json({ error: "Published template not found" });
+        return;
+      }
+
+      const { generateSkDocument } = await import(
+        "../services/sk-document-generation"
+      );
+      const result = await generateSkDocument(template, variables ?? {}, {
+        validateRequired: false,
+      });
+
+      res.setHeader("Content-Type", result.contentType);
+      res.setHeader(
+        "Content-Disposition",
+        `inline; filename="${encodeURIComponent(result.fileName)}"`
+      );
+      res.send(result.buffer);
+    } catch (err) {
+      console.error(err);
+      res.status(400).json({
+        error: err instanceof Error ? err.message : "Failed to preview document",
+      });
+    }
+  }
+);
+
+router.post(
+  "/cases/:id/document-templates/generate",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const legalCase = await findAccessibleCase(req, caseId);
+      if (!legalCase) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
+
+      const { templateId, variables } = req.body as {
+        templateId?: string;
+        variables?: Record<string, string | number>;
+      };
+      if (!templateId?.trim()) {
+        res.status(400).json({ error: "templateId is required" });
+        return;
+      }
+
+      const template = await loadPublishedSkTemplate(templateId);
+      if (!template) {
+        res.status(404).json({ error: "Published template not found" });
+        return;
+      }
+
+      const teamId = legalCase.teamId?.toString();
+      if (teamId) {
+        const docQuota = await assertFirmCanGenerateDocument(teamId);
+        if (!docQuota.allowed) {
+          res.status(429).json({
+            error: docQuota.error,
+            code: docQuota.code,
+            used: docQuota.used,
+            limit: docQuota.limit,
+            firmQuota: docQuota.quota,
+          });
+          return;
+        }
+      }
+
+      const { generateSkDocument } = await import(
+        "../services/sk-document-generation"
+      );
+      const result = await generateSkDocument(template, variables ?? {});
+
+      res.setHeader("Content-Type", result.contentType);
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${encodeURIComponent(result.fileName)}"`
+      );
+      res.send(result.buffer);
+    } catch (err) {
+      console.error(err);
+      res.status(400).json({
+        error:
+          err instanceof Error ? err.message : "Failed to generate document",
+      });
+    }
+  }
+);
+
+router.post(
+  "/cases/:id/document-templates/save",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const user = req.sajiloKanunUser!;
+      if (!(await canUploadCaseFiles(user))) {
+        res.status(403).json({ error: "Permission denied" });
+        return;
+      }
+
+      const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const legalCase = await findAccessibleCase(req, caseId);
+      if (!legalCase) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
+      if (!legalCase.teamId) {
+        res.status(400).json({ error: "Case is missing firm assignment" });
+        return;
+      }
+
+      const { templateId, variables } = req.body as {
+        templateId?: string;
+        variables?: Record<string, string | number>;
+      };
+      if (!templateId?.trim()) {
+        res.status(400).json({ error: "templateId is required" });
+        return;
+      }
+
+      const template = await loadPublishedSkTemplate(templateId);
+      if (!template) {
+        res.status(404).json({ error: "Published template not found" });
+        return;
+      }
+
+      const teamId = legalCase.teamId.toString();
+      const docQuota = await assertFirmCanGenerateDocument(teamId);
+      if (!docQuota.allowed) {
+        res.status(429).json({
+          error: docQuota.error,
+          code: docQuota.code,
+          used: docQuota.used,
+          limit: docQuota.limit,
+          firmQuota: docQuota.quota,
+        });
+        return;
+      }
+
+      const { generateSkDocument } = await import(
+        "../services/sk-document-generation"
+      );
+      const result = await generateSkDocument(template, variables ?? {});
+
+      const saved = await saveCaseUploadBuffer({
+        teamId,
+        caseId: legalCase._id.toString(),
+        fileName: result.fileName,
+        mimeType: result.contentType,
+        buffer: result.buffer,
+      });
+
+      const doc = await CaseUploadedDocument.create({
+        caseId: legalCase._id,
+        teamId: legalCase.teamId,
+        uploadedBy: new mongoose.Types.ObjectId(user.id),
+        fileName: saved.fileName,
+        mimeType: saved.mimeType,
+        size: saved.size,
+        storageKey: saved.storageKey,
+      });
+
+      res.status(201).json({
+        upload: caseUploadedDocumentToJson(doc, {
+          name: user.name,
+          username: user.username,
+        }),
+        fileName: saved.fileName,
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(400).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : "Failed to save generated document",
+      });
+    }
+  }
+);
 
 router.get(
   "/cases/:id",
@@ -1117,6 +1830,62 @@ router.post(
       console.error(err);
       res.status(400).json({
         error: err instanceof Error ? err.message : "Failed to upload document",
+      });
+    }
+  }
+);
+
+router.get(
+  "/cases/:id/export",
+  requireSajiloKanunAuth,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const user = req.sajiloKanunUser!;
+      if (!(await canReadCaseFiles(user))) {
+        res.status(403).json({ error: "Permission denied" });
+        return;
+      }
+
+      const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const legalCase = await findAccessibleCase(req, caseId);
+      if (!legalCase) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
+
+      const uploads = await CaseUploadedDocument.find({
+        caseId: legalCase._id,
+        teamId: legalCase.teamId,
+      }).sort({ createdAt: 1 });
+
+      if (uploads.length === 0) {
+        res.status(404).json({
+          error:
+            "No case files to export. Save generated drafts and uploads first.",
+        });
+        return;
+      }
+
+      const zipBuffer = await zipCaseUploads({
+        teamId: legalCase.teamId.toString(),
+        caseId: legalCase._id.toString(),
+        uploads,
+      });
+
+      const asciiName = asciiZipFileName(legalCase.caseNo);
+      const displayName = `case-${legalCase.caseNo}-files.zip`;
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(displayName)}`
+      );
+      res.setHeader("Cache-Control", "private, no-store");
+      res.setHeader("X-Content-Type-Options", "nosniff");
+      res.send(zipBuffer);
+    } catch (err) {
+      console.error(err);
+      res.status(400).json({
+        error: err instanceof Error ? err.message : "Failed to export case files",
       });
     }
   }
@@ -1616,7 +2385,7 @@ router.get(
       }
 
       const cases = await LegalCase.find(caseFilter)
-        .select("_id title caseNo status type partySide")
+        .select("_id title caseNo status type partySide courtName courtNameEn")
         .lean();
       const caseById = new Map(
         cases.map((legalCase) => [legalCase._id.toString(), legalCase])
@@ -1634,14 +2403,21 @@ router.get(
             openCases: 0,
           },
           activities: [],
+          pesiRows: [],
         });
         return;
       }
 
-      const activities = await CaseActivity.find({
-        teamId,
-        caseId: { $in: caseIds },
-      }).sort({ activityDate: 1, _id: 1 });
+      const [activities, pesiDocs] = await Promise.all([
+        CaseActivity.find({
+          teamId,
+          caseId: { $in: caseIds },
+        }).sort({ activityDate: 1, _id: 1 }),
+        CasePesiRow.find({
+          teamId,
+          caseId: { $in: caseIds },
+        }).sort({ pesiDate: 1, _id: 1 }),
+      ]);
 
       const now = new Date();
       const startOfToday = new Date(
@@ -1655,24 +2431,28 @@ router.get(
       let dueThisWeek = 0;
       let upcoming = 0;
 
-      const rows = activities.map((activity) => {
-        const legalCase = caseById.get(activity.caseId.toString());
-        const activityTime = activity.activityDate.getTime();
-        let urgency: "overdue" | "today" | "week" | "upcoming" | "past" = "upcoming";
-        if (activityTime < startOfToday.getTime()) {
-          urgency = "overdue";
-          overdue += 1;
-        } else if (activityTime <= endOfToday.getTime()) {
-          urgency = "today";
-          dueToday += 1;
-        } else if (activityTime <= endOfWeek.getTime()) {
-          urgency = "week";
+      function bumpUrgency(
+        urgency: "overdue" | "today" | "week" | "upcoming" | "past"
+      ) {
+        if (urgency === "overdue") overdue += 1;
+        else if (urgency === "today") dueToday += 1;
+        else if (urgency === "week") {
           dueThisWeek += 1;
           upcoming += 1;
-        } else {
-          urgency = "upcoming";
-          upcoming += 1;
-        }
+        } else if (urgency === "upcoming") upcoming += 1;
+      }
+
+      function urgencyFromAdDate(activityTime: number) {
+        if (activityTime < startOfToday.getTime()) return "overdue" as const;
+        if (activityTime <= endOfToday.getTime()) return "today" as const;
+        if (activityTime <= endOfWeek.getTime()) return "week" as const;
+        return "upcoming" as const;
+      }
+
+      const rows = activities.map((activity) => {
+        const legalCase = caseById.get(activity.caseId.toString());
+        const urgency = urgencyFromAdDate(activity.activityDate.getTime());
+        bumpUrgency(urgency);
 
         return {
           ...caseActivityToJson(activity),
@@ -1682,6 +2462,8 @@ router.get(
           caseStatus: legalCase?.status ?? "open",
           caseType: legalCase?.type ?? "civil",
           partySide: legalCase?.partySide ?? "plaintiff",
+          courtName: legalCase?.courtName ?? "",
+          courtNameEn: legalCase?.courtNameEn ?? "",
         };
       });
 
@@ -1690,11 +2472,51 @@ router.get(
         (a, b) => +new Date(a.activityDate) - +new Date(b.activityDate)
       );
 
+      const pesiRows = pesiDocs
+        .map((pesi) => {
+          const legalCase = caseById.get(pesi.caseId.toString());
+          const bs = parseBsDateString(pesi.pesiDate);
+          // Fallback: treat unparsable dates as upcoming so they still appear under "all".
+          const bsYear = bs?.year ?? 2100;
+          const bsMonth = bs?.month ?? 1;
+          const bsDay = bs?.day ?? 1;
+          // Approximate AD for server-side urgency buckets (frontend re-filters by BS remaining days).
+          const approxAd = new Date(Date.UTC(bsYear - 57, bsMonth - 1, bsDay));
+          const urgency = bs
+            ? urgencyFromAdDate(approxAd.getTime())
+            : ("upcoming" as const);
+          bumpUrgency(urgency);
+
+          return {
+            ...casePesiRowToJson(pesi),
+            urgency,
+            bsYear,
+            bsMonth,
+            bsDay,
+            activityType: "hearing_date" as const,
+            labelEn: "Court-published activities",
+            labelNe: "अदालतमा प्रकाशित गतिविधिहरू",
+            caseTitle: legalCase?.title ?? "",
+            caseNo: legalCase?.caseNo ?? "",
+            caseStatus: legalCase?.status ?? "open",
+            caseType: legalCase?.type ?? "civil",
+            partySide: legalCase?.partySide ?? "plaintiff",
+            courtName: legalCase?.courtName ?? "",
+            courtNameEn: legalCase?.courtNameEn ?? "",
+          };
+        })
+        .sort((a, b) => {
+          if (a.bsYear !== b.bsYear) return a.bsYear - b.bsYear;
+          if (a.bsMonth !== b.bsMonth) return a.bsMonth - b.bsMonth;
+          if (a.bsDay !== b.bsDay) return a.bsDay - b.bsDay;
+          return a.caseNo.localeCompare(b.caseNo);
+        });
+
       const openCases = cases.filter((legalCase) => legalCase.status !== "closed").length;
 
       res.json({
         summary: {
-          total: rows.length,
+          total: rows.length + pesiRows.length,
           overdue,
           dueToday,
           dueThisWeek,
@@ -1702,6 +2524,7 @@ router.get(
           openCases,
         },
         activities: rows,
+        pesiRows,
       });
     } catch (err) {
       console.error(err);
@@ -1740,6 +2563,297 @@ router.get(
     } catch (err) {
       console.error(err);
       res.status(500).json({ error: "Failed to list activities" });
+    }
+  }
+);
+
+router.get(
+  "/cases/:id/pesi",
+  requireSajiloKanunAuth,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const legalCase = await findAccessibleCase(req, caseId);
+      if (!legalCase) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
+
+      const rows = await CasePesiRow.find({ caseId: legalCase._id }).sort({
+        pesiDate: -1,
+        _id: -1,
+      });
+
+      res.json({
+        columns: CASE_PESI_COLUMNS,
+        courtScDailyId: legalCase.courtScDailyId ?? null,
+        caseNo: legalCase.caseNo,
+        rows: rows.map(casePesiRowToJson),
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to load pesi rows" });
+    }
+  }
+);
+
+router.post(
+  "/cases/:id/pesi/fetch",
+  requireSajiloKanunAuth,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const legalCase = await findAccessibleCase(req, caseId);
+      if (!legalCase) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
+
+      let courtScDailyId = legalCase.courtScDailyId;
+      if (typeof courtScDailyId !== "number" && legalCase.courtId) {
+        const { Court } = await import("../models/Court");
+        const court = await Court.findById(legalCase.courtId).select("scDailyId");
+        if (typeof court?.scDailyId === "number") {
+          courtScDailyId = court.scDailyId;
+          legalCase.courtScDailyId = court.scDailyId;
+          await legalCase.save();
+        }
+      }
+      if (typeof courtScDailyId !== "number") {
+        res.status(400).json({
+          error:
+            "This case has no Supreme Court court id. Edit the case and select a district court first.",
+        });
+        return;
+      }
+
+      const result = await fetchAndMatchCasePesi({
+        courtScDailyId,
+        caseNo: legalCase.caseNo,
+      });
+
+      const fetchedAt = new Date(result.fetchedAt);
+      const fetchedBy = new mongoose.Types.ObjectId(req.sajiloKanunUser!.id);
+      const saved = [];
+
+      for (const row of result.matchedRows) {
+        const doc = await CasePesiRow.findOneAndUpdate(
+          {
+            caseId: legalCase._id,
+            pesiDate: row.pesiDate,
+            caseNoRaw: row.caseNoRaw,
+          },
+          {
+            $set: {
+              teamId: legalCase.teamId,
+              courtScDailyId,
+              pesiDate: row.pesiDate,
+              sn: row.sn,
+              caseNoRaw: row.caseNoRaw,
+              registrationDate: row.registrationDate,
+              matter: row.matter,
+              parties: row.parties,
+              fantawala: row.fantawala,
+              signal: row.signal,
+              priority: row.priority,
+              remarks: row.remarks,
+              cells: row.cells,
+              fetchedAt,
+              fetchedBy,
+            },
+          },
+          { upsert: true, new: true }
+        );
+        saved.push(casePesiRowToJson(doc));
+      }
+
+      const allRows = await CasePesiRow.find({ caseId: legalCase._id }).sort({
+        pesiDate: -1,
+        _id: -1,
+      });
+
+      res.json({
+        columns: CASE_PESI_COLUMNS,
+        courtScDailyId,
+        caseNo: legalCase.caseNo,
+        totalRowsScanned: result.totalRows,
+        matchedCount: saved.length,
+        fetchedAt: result.fetchedAt,
+        rows: allRows.map(casePesiRowToJson),
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(502).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : "Failed to fetch Supreme Court pesi list",
+      });
+    }
+  }
+);
+
+router.post(
+  "/dashboard/pesi/fetch",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const user = req.sajiloKanunUser!;
+      if (user.role !== "admin") {
+        res.status(403).json({ error: "Only firm admins can refresh court pesi" });
+        return;
+      }
+
+      const teamId = user.teamId!;
+      const cases = await LegalCase.find({
+        teamId,
+        status: { $ne: "closed" },
+      })
+        .select("_id caseNo courtId courtScDailyId")
+        .lean();
+
+      if (cases.length === 0) {
+        res.json({
+          casesProcessed: 0,
+          casesSkipped: 0,
+          matchedCount: 0,
+          courtsFetched: 0,
+          errors: [],
+        });
+        return;
+      }
+
+      const { Court } = await import("../models/Court");
+      const missingCourtIds = [
+        ...new Set(
+          cases
+            .filter((c) => typeof c.courtScDailyId !== "number" && c.courtId)
+            .map((c) => c.courtId!.toString())
+        ),
+      ];
+      const courtDocs =
+        missingCourtIds.length > 0
+          ? await Court.find({ _id: { $in: missingCourtIds } })
+              .select("_id scDailyId")
+              .lean()
+          : [];
+      const scDailyByCourtId = new Map(
+        courtDocs
+          .filter((c) => typeof c.scDailyId === "number")
+          .map((c) => [c._id.toString(), c.scDailyId as number])
+      );
+
+      type CaseWithCourt = {
+        _id: mongoose.Types.ObjectId;
+        caseNo: string;
+        courtScDailyId: number;
+      };
+      const eligible: CaseWithCourt[] = [];
+      let casesSkipped = 0;
+      for (const legalCase of cases) {
+        let courtScDailyId =
+          typeof legalCase.courtScDailyId === "number"
+            ? legalCase.courtScDailyId
+            : legalCase.courtId
+              ? scDailyByCourtId.get(legalCase.courtId.toString())
+              : undefined;
+        if (typeof courtScDailyId !== "number") {
+          casesSkipped += 1;
+          continue;
+        }
+        eligible.push({
+          _id: legalCase._id,
+          caseNo: legalCase.caseNo,
+          courtScDailyId,
+        });
+      }
+
+      const byCourt = new Map<number, CaseWithCourt[]>();
+      for (const item of eligible) {
+        const list = byCourt.get(item.courtScDailyId) ?? [];
+        list.push(item);
+        byCourt.set(item.courtScDailyId, list);
+      }
+
+      const fetchedBy = new mongoose.Types.ObjectId(user.id);
+      let matchedCount = 0;
+      let courtsFetched = 0;
+      const errors: { caseId: string; caseNo: string; error: string }[] = [];
+
+      for (const [courtScDailyId, courtCases] of byCourt) {
+        try {
+          const { rows, fetchedAt } = await fetchCourtWeeklyPesiRows(courtScDailyId);
+          courtsFetched += 1;
+          const fetchedAtDate = new Date(fetchedAt);
+
+          for (const legalCase of courtCases) {
+            try {
+              const matched = rows.filter((row) =>
+                caseNoMatches(row.caseNoRaw, legalCase.caseNo)
+              );
+              for (const row of matched) {
+                await CasePesiRow.findOneAndUpdate(
+                  {
+                    caseId: legalCase._id,
+                    pesiDate: row.pesiDate,
+                    caseNoRaw: row.caseNoRaw,
+                  },
+                  {
+                    $set: {
+                      teamId,
+                      courtScDailyId,
+                      pesiDate: row.pesiDate,
+                      sn: row.sn,
+                      caseNoRaw: row.caseNoRaw,
+                      registrationDate: row.registrationDate,
+                      matter: row.matter,
+                      parties: row.parties,
+                      fantawala: row.fantawala,
+                      signal: row.signal,
+                      priority: row.priority,
+                      remarks: row.remarks,
+                      cells: row.cells,
+                      fetchedAt: fetchedAtDate,
+                      fetchedBy,
+                    },
+                  },
+                  { upsert: true, new: true }
+                );
+                matchedCount += 1;
+              }
+            } catch (err) {
+              errors.push({
+                caseId: legalCase._id.toString(),
+                caseNo: legalCase.caseNo,
+                error: err instanceof Error ? err.message : "Failed to save pesi",
+              });
+            }
+          }
+        } catch (err) {
+          for (const legalCase of courtCases) {
+            errors.push({
+              caseId: legalCase._id.toString(),
+              caseNo: legalCase.caseNo,
+              error:
+                err instanceof Error
+                  ? err.message
+                  : "Failed to fetch court pesi list",
+            });
+          }
+        }
+      }
+
+      res.json({
+        casesProcessed: eligible.length,
+        casesSkipped,
+        matchedCount,
+        courtsFetched,
+        errors,
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to refresh court pesi" });
     }
   }
 );
@@ -1886,15 +3000,41 @@ router.post(
         return;
       }
 
+      const teamId = legalCase.teamId?.toString();
+      if (teamId) {
+        const docQuota = await assertFirmCanGenerateDocument(teamId);
+        if (!docQuota.allowed) {
+          res.status(429).json({
+            error: docQuota.error,
+            code: docQuota.code,
+            used: docQuota.used,
+            limit: docQuota.limit,
+            firmQuota: docQuota.quota,
+          });
+          return;
+        }
+      }
+
       const title = LEGAL_CASE_DOCUMENT_TITLES[kind];
       const now = new Date();
+      const rawContent =
+        typeof (req.body as { content?: unknown }).content === "string"
+          ? (req.body as { content: string }).content.trim()
+          : "";
+      const hasGeneratedContent = rawContent.length > 0;
+      if (rawContent.length > 50000) {
+        res.status(400).json({ error: "Document content is too long" });
+        return;
+      }
+
       legalCase.documents.push({
         kind,
         title,
-        status: "placeholder",
-        content:
-          `[Placeholder] ${title} for case ${legalCase.caseNo} (${legalCase.title}).\n` +
-          `AI document generation will be connected in a later phase.`,
+        status: hasGeneratedContent ? "ready" : "placeholder",
+        content: hasGeneratedContent
+          ? rawContent
+          : `[Placeholder] ${title} for case ${legalCase.caseNo} (${legalCase.title}).\n` +
+            `AI document generation will be connected in a later phase.`,
         createdBy: new mongoose.Types.ObjectId(req.sajiloKanunUser!.id),
         createdAt: now,
         updatedAt: now,
@@ -1906,6 +3046,145 @@ router.post(
       console.error(err);
       res.status(400).json({
         error: err instanceof Error ? err.message : "Failed to generate document",
+      });
+    }
+  }
+);
+
+router.post(
+  "/cases/:id/documents/:docId/save-to-files",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const user = req.sajiloKanunUser!;
+      if (!(await canUploadCaseFiles(user))) {
+        res.status(403).json({ error: "Permission denied" });
+        return;
+      }
+
+      const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const docId = Array.isArray(req.params.docId)
+        ? req.params.docId[0]
+        : req.params.docId;
+      const legalCase = await findAccessibleCase(req, caseId);
+      if (!legalCase) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
+      if (!legalCase.teamId) {
+        res.status(400).json({ error: "Case is missing firm assignment" });
+        return;
+      }
+
+      const draft = legalCase.documents.find(
+        (item) => item._id.toString() === docId
+      );
+      if (!draft) {
+        res.status(404).json({ error: "Generated document not found" });
+        return;
+      }
+      if (draft.status !== "ready" || !draft.content?.trim()) {
+        res.status(400).json({
+          error: "Only a completed AI draft can be saved to case files",
+        });
+        return;
+      }
+
+      const buffer = await plaintextToDocxBuffer(draft.content);
+      const saved = await saveCaseUploadBuffer({
+        teamId: legalCase.teamId.toString(),
+        caseId: legalCase._id.toString(),
+        fileName: generatedDraftFileName(draft.title),
+        mimeType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        buffer,
+      });
+
+      const upload = await CaseUploadedDocument.create({
+        caseId: legalCase._id,
+        teamId: legalCase.teamId,
+        uploadedBy: new mongoose.Types.ObjectId(user.id),
+        fileName: saved.fileName,
+        mimeType: saved.mimeType,
+        size: saved.size,
+        storageKey: saved.storageKey,
+      });
+
+      draft.savedUploadId = upload._id;
+      draft.updatedAt = new Date();
+      await legalCase.save();
+
+      res.json(legalCaseToJson(legalCase, { detail: true }));
+    } catch (err) {
+      console.error(err);
+      res.status(400).json({
+        error:
+          err instanceof Error ? err.message : "Failed to save draft to case files",
+      });
+    }
+  }
+);
+
+router.put(
+  "/cases/:id/extraction",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const legalCase = await findAccessibleCase(req, caseId);
+      if (!legalCase) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
+
+      const body = req.body as {
+        facts?: unknown;
+        sourceFileNames?: unknown;
+        model?: unknown;
+      };
+      if (!body.facts || typeof body.facts !== "object" || Array.isArray(body.facts)) {
+        res.status(400).json({ error: "Extraction facts object is required" });
+        return;
+      }
+
+      const serialized = JSON.stringify(body.facts);
+      if (serialized.length > 200_000) {
+        res.status(400).json({ error: "Extraction payload is too large" });
+        return;
+      }
+
+      const sourceFileNames = Array.isArray(body.sourceFileNames)
+        ? body.sourceFileNames
+            .filter((name): name is string => typeof name === "string")
+            .map((name) => name.trim())
+            .filter(Boolean)
+            .slice(0, 20)
+        : legalCase.documentExtraction?.sourceFileNames ?? [];
+
+      const model =
+        typeof body.model === "string" && body.model.trim()
+          ? body.model.trim().slice(0, 120)
+          : legalCase.documentExtraction?.model ?? "";
+
+      const now = new Date();
+      const createdAt = legalCase.documentExtraction?.createdAt ?? now;
+      legalCase.documentExtraction = {
+        facts: body.facts as Record<string, unknown>,
+        sourceFileNames,
+        model,
+        updatedBy: new mongoose.Types.ObjectId(req.sajiloKanunUser!.id),
+        createdAt,
+        updatedAt: now,
+      };
+
+      await legalCase.save();
+      res.json(legalCaseToJson(legalCase, { detail: true }));
+    } catch (err) {
+      console.error(err);
+      res.status(400).json({
+        error: err instanceof Error ? err.message : "Failed to save extraction",
       });
     }
   }

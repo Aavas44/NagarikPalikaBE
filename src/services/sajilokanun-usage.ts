@@ -64,6 +64,10 @@ export type UsageRequestLog = {
   billableTokens: number;
   processCount: number;
   processes: UsageProcessLog[];
+  /** Present on team/admin usage logs. */
+  userId?: string;
+  userName?: string;
+  username?: string;
 };
 
 export type UsageLogResponse = {
@@ -537,11 +541,21 @@ export async function getTeamUsageSummary(teamId: string): Promise<UsageSummary>
 
 export async function getTeamUsageLog(
   teamId: string,
-  options: { limit?: number; offset?: number } = {}
+  options: { limit?: number; offset?: number; userId?: string } = {}
 ): Promise<UsageLogResponse> {
   const limit = Math.min(Math.max(options.limit ?? 30, 1), 100);
   const offset = Math.max(options.offset ?? 0, 0);
   const teamObjectId = new mongoose.Types.ObjectId(teamId);
+  const filterUserId =
+    options.userId && mongoose.Types.ObjectId.isValid(options.userId)
+      ? new mongoose.Types.ObjectId(options.userId)
+      : null;
+
+  const match: Record<string, unknown> = {
+    teamId: teamObjectId,
+    requestId: { $exists: true, $ne: null },
+  };
+  if (filterUserId) match.userId = filterUserId;
 
   const grouped = await SajiloKanunTokenUsage.aggregate<{
     _id: string;
@@ -566,7 +580,7 @@ export async function getTeamUsageLog(
       createdAt: Date;
     }>;
   }>([
-    { $match: { teamId: teamObjectId, requestId: { $exists: true, $ne: null } } },
+    { $match: match },
     { $sort: { createdAt: -1 } },
     {
       $group: {
@@ -603,6 +617,29 @@ export async function getTeamUsageLog(
   const hasMore = grouped.length > limit;
   const page = hasMore ? grouped.slice(0, limit) : grouped;
 
+  const accountIds = [
+    ...new Set(
+      page
+        .map((row) => row.userId?.toString())
+        .filter((id): id is string => Boolean(id))
+    ),
+  ];
+  const accounts =
+    accountIds.length > 0
+      ? await SajiloKanunAccount.find({ _id: { $in: accountIds } })
+          .select("_id name username")
+          .lean()
+      : [];
+  const accountById = new Map(
+    accounts.map((account) => [
+      account._id.toString(),
+      {
+        name: account.name ?? "",
+        username: account.username ?? "",
+      },
+    ])
+  );
+
   const requests: UsageRequestLog[] = page.map((row) => {
     const cachedTokens = row.cachedTokens ?? 0;
     const processes = row.processes
@@ -611,6 +648,8 @@ export async function getTeamUsageLog(
           (OPERATION_ORDER[a.operation] ?? 99) - (OPERATION_ORDER[b.operation] ?? 99)
       )
       .map((process) => toProcessLog(process));
+    const userId = row.userId?.toString() ?? "";
+    const account = userId ? accountById.get(userId) : undefined;
 
     return {
       requestId: row._id,
@@ -630,6 +669,9 @@ export async function getTeamUsageLog(
       }),
       processCount: row.processCount,
       processes,
+      userId: userId || undefined,
+      userName: account?.name || undefined,
+      username: account?.username || undefined,
     };
   });
 
