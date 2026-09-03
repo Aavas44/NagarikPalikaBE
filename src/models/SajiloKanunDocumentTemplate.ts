@@ -13,6 +13,8 @@ export interface ISkTemplateVariable {
   labelNe: string;
   type: SkTemplateVariableType;
   required: boolean;
+  /** Optional UI grouping (e.g. court, plaintiff_1, defendant_2). */
+  section?: string;
 }
 
 export interface ISajiloKanunDocumentTemplate extends Document {
@@ -48,6 +50,7 @@ const variableSchema = new Schema<ISkTemplateVariable>(
       default: "text",
     },
     required: { type: Boolean, default: true },
+    section: { type: String, default: "", trim: true, maxlength: 80 },
   },
   { _id: false }
 );
@@ -123,6 +126,7 @@ export function sajiloKanunDocumentTemplateToJson(
       label: { en: v.labelEn, ne: v.labelNe || v.labelEn },
       type: v.type,
       required: v.required,
+      section: v.section || "",
     })),
     fileType: template.fileType,
     originalFileName: template.originalFileName,

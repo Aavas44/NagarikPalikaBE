@@ -6,6 +6,25 @@ import { readSkTemplateFileBuffer } from "./sk-template-content";
 
 export type SkGenerationVariables = Record<string, string | number>;
 
+const SK_FIELD_START = "\uE000";
+const SK_FIELD_MID = "\uE001";
+const SK_FIELD_END_START = "\uE002";
+const SK_FIELD_END = "\uE003";
+
+function wrapPreviewField(key: string, display: string): string {
+  return `${SK_FIELD_START}${key}${SK_FIELD_MID}${display}${SK_FIELD_END_START}${key}${SK_FIELD_END}`;
+}
+
+function previewDisplayForField(
+  template: ISajiloKanunDocumentTemplate,
+  key: string,
+  value: string
+): string {
+  if (value.trim()) return value;
+  const meta = template.variables.find((v) => v.key === key);
+  return meta?.labelNe || meta?.labelEn || key;
+}
+
 function sanitizeValues(
   placeholderKeys: string[],
   inputValues: SkGenerationVariables
@@ -28,6 +47,7 @@ function validateRequiredVariables(
     if (!variable.required) continue;
     // Official SC forms mark every blank as required; treat generic blanks as optional.
     if (/^blank_\d+$/i.test(variable.key)) continue;
+    if (/^unknown_\d+$/i.test(variable.key)) continue;
     if (!values[variable.key]?.trim()) {
       missing.push(
         variable.labelNe || variable.labelEn || variable.key
@@ -52,6 +72,7 @@ export async function getSkTemplateFormFields(
   const userFields = placeholderKeys.map((key) => {
     const meta = byKey.get(key);
     const isBlank = /^blank_\d+$/i.test(key);
+    const isUnknown = /^unknown_\d+$/i.test(key);
     return {
       key,
       label: {
@@ -59,7 +80,8 @@ export async function getSkTemplateFormFields(
         ne: meta?.labelNe || meta?.labelEn || key,
       },
       type: (meta?.type ?? "text") as "text" | "date" | "number",
-      required: isBlank ? false : (meta?.required ?? true),
+      required: isBlank || isUnknown ? false : (meta?.required ?? false),
+      section: meta?.section || "",
     };
   });
 
@@ -73,9 +95,11 @@ export async function getSkTemplateFormFields(
         ne: variable.labelNe || variable.labelEn || variable.key,
       },
       type: variable.type,
-      required: /^blank_\d+$/i.test(variable.key)
-        ? false
-        : variable.required,
+      required:
+        /^blank_\d+$/i.test(variable.key) || /^unknown_\d+$/i.test(variable.key)
+          ? false
+          : variable.required,
+      section: variable.section || "",
     });
   }
 
@@ -88,7 +112,7 @@ export async function getSkTemplateFormFields(
 export async function generateSkDocument(
   template: ISajiloKanunDocumentTemplate,
   inputValues: SkGenerationVariables,
-  options?: { validateRequired?: boolean }
+  options?: { validateRequired?: boolean; forPreview?: boolean }
 ): Promise<{ buffer: Buffer; fileName: string; contentType: string }> {
   if (template.fileType !== "docx") {
     throw new Error(
@@ -99,6 +123,15 @@ export async function generateSkDocument(
   const templateBuffer = await readSkTemplateFileBuffer(template.storageKey);
   const placeholderKeys = extractPlaceholdersFromDocx(templateBuffer);
   const merged = sanitizeValues(placeholderKeys, inputValues);
+
+  if (options?.forPreview) {
+    for (const key of placeholderKeys) {
+      merged[key] = wrapPreviewField(
+        key,
+        previewDisplayForField(template, key, merged[key])
+      );
+    }
+  }
 
   if (options?.validateRequired !== false) {
     validateRequiredVariables(template, merged);
@@ -118,14 +151,13 @@ export async function generateSkDocument(
     template.nameEn ||
     template.originalFileName.replace(/\.docx$/i, "")
   )
-    .replace(/[^\p{L}\p{N}\s._-]+/gu, "")
+    .replace(/[\\/:*?"<>|\r\n]+/g, "")
     .trim()
-    .replace(/\s+/g, "-")
-    .slice(0, 80);
+    .slice(0, 120);
 
   return {
     buffer,
-    fileName: `${baseName || "document"}-filled.docx`,
+    fileName: `${baseName || template.slug || "document"}-filled.docx`,
     contentType:
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   };

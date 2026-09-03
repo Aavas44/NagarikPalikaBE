@@ -74,12 +74,15 @@ function parseVariables(raw: unknown): ISkTemplateVariable[] {
             ? v.labelNe.trim()
             : "";
       const type = v.type === "date" || v.type === "number" ? v.type : "text";
+      const section =
+        typeof v.section === "string" ? v.section.trim().slice(0, 80) : "";
       return {
         key,
         labelEn,
         labelNe,
         type,
         required: v.required !== false,
+        section,
       };
     })
     .filter(Boolean) as ISkTemplateVariable[];

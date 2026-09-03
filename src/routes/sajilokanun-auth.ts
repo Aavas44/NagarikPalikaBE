@@ -1246,6 +1246,7 @@ router.post(
       );
       const result = await generateSkDocument(template, variables ?? {}, {
         validateRequired: false,
+        forPreview: true,
       });
 
       res.setHeader("Content-Type", result.contentType);
@@ -1322,6 +1323,111 @@ router.post(
       res.status(400).json({
         error:
           err instanceof Error ? err.message : "Failed to generate document",
+      });
+    }
+  }
+);
+
+/**
+ * Gemini maps case OCR + form hints onto template fields, then fills the existing DOCX.
+ * Returns filled values so the client can preview / download / save.
+ */
+router.post(
+  "/cases/:id/document-templates/generate-ai",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const caseId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+      const legalCase = await findAccessibleCase(req, caseId);
+      if (!legalCase) {
+        res.status(404).json({ error: "Case not found" });
+        return;
+      }
+
+      const { templateId, variables } = req.body as {
+        templateId?: string;
+        variables?: Record<string, string | number>;
+      };
+      if (!templateId?.trim()) {
+        res.status(400).json({ error: "templateId is required" });
+        return;
+      }
+
+      const template = await loadPublishedSkTemplate(templateId);
+      if (!template) {
+        res.status(404).json({ error: "Published template not found" });
+        return;
+      }
+
+      const teamId = legalCase.teamId?.toString();
+      if (teamId) {
+        const docQuota = await assertFirmCanGenerateDocument(teamId);
+        if (!docQuota.allowed) {
+          res.status(429).json({
+            error: docQuota.error,
+            code: docQuota.code,
+            used: docQuota.used,
+            limit: docQuota.limit,
+            firmQuota: docQuota.quota,
+          });
+          return;
+        }
+      }
+
+      const {
+        getSkTemplateFormFields,
+        generateSkDocument,
+      } = await import("../services/sk-document-generation");
+      const { aiFillSkTemplateValues } = await import(
+        "../services/sk-ai-fill-template"
+      );
+
+      const fields = await getSkTemplateFormFields(template);
+      const userValues: Record<string, string> = {};
+      for (const [key, value] of Object.entries(variables ?? {})) {
+        userValues[key] =
+          value === undefined || value === null ? "" : String(value).trim();
+      }
+
+      const caseVitals =
+        legalCase.documentExtraction?.facts &&
+        typeof legalCase.documentExtraction.facts === "object"
+          ? (legalCase.documentExtraction.facts as Record<string, unknown>)
+          : null;
+
+      const filled = await aiFillSkTemplateValues({
+        templateName:
+          template.nameNe || template.nameEn || template.slug || templateId,
+        fields: fields.userFields.map((f) => ({
+          key: f.key,
+          labelEn: f.label.en,
+          labelNe: f.label.ne,
+          section: f.section,
+        })),
+        caseVitals,
+        userValues,
+      });
+
+      // Validate by rendering (no preview markers)
+      const result = await generateSkDocument(template, filled.values, {
+        validateRequired: false,
+      });
+
+      res.json({
+        values: filled.values,
+        filledCount: filled.filledCount,
+        fileName: result.fileName,
+        contentType: result.contentType,
+        contentBase64: result.buffer.toString("base64"),
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(400).json({
+        error:
+          err instanceof Error
+            ? err.message
+            : "Failed to AI-generate document",
       });
     }
   }
