@@ -16,6 +16,7 @@ export interface IWardOperatorProfile extends Document {
   formerWardNo: string;
   generationLimit: number | null;
   generationCount: number;
+  starredTemplateIds: Types.ObjectId[];
   active: boolean;
   createdBy?: Types.ObjectId;
   createdAt: Date;
@@ -58,6 +59,10 @@ const wardOperatorProfileSchema = new Schema<IWardOperatorProfile>(
     formerWardNo: { type: String, required: true, trim: true },
     generationLimit: { type: Number, default: null, min: 1 },
     generationCount: { type: Number, default: 0, min: 0 },
+    starredTemplateIds: {
+      type: [{ type: Schema.Types.ObjectId, ref: "WardDocumentTemplate" }],
+      default: [],
+    },
     active: { type: Boolean, default: true, index: true },
     createdBy: { type: Schema.Types.ObjectId, ref: "User" },
   },
@@ -90,6 +95,9 @@ export function wardOperatorProfileToJson(
     generationCount: quota.used,
     generationRemaining: quota.remaining,
     generationUnlimited: quota.unlimited,
+    starredTemplateIds: (profile.starredTemplateIds ?? []).map((id) =>
+      id.toString()
+    ),
     active: profile.active,
     email: wardOperatorDisplayEmail(user?.email ?? null),
     createdAt: profile.createdAt.toISOString(),

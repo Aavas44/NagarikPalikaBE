@@ -11,6 +11,7 @@ export interface ISajiloKanunAccount extends Document {
   active: boolean;
   teamId?: Types.ObjectId;
   role?: SajiloKanunAccountRole;
+  starredDocumentTemplateIds: Types.ObjectId[];
   createdBy?: Types.ObjectId;
   platformUserId?: Types.ObjectId;
   createdAt: Date;
@@ -27,6 +28,12 @@ const accountSchema = new Schema<ISajiloKanunAccount>(
     active: { type: Boolean, default: true },
     teamId: { type: Schema.Types.ObjectId, ref: "Team", index: true },
     role: { type: String, enum: ["admin", "member", "caseUser"] },
+    starredDocumentTemplateIds: {
+      type: [
+        { type: Schema.Types.ObjectId, ref: "SajiloKanunDocumentTemplate" },
+      ],
+      default: [],
+    },
     createdBy: { type: Schema.Types.ObjectId },
     platformUserId: {
       type: Schema.Types.ObjectId,
@@ -57,6 +64,9 @@ export function sajiloKanunAccountToJson(account: ISajiloKanunAccount) {
     active: account.active,
     teamId: account.teamId?.toString() ?? null,
     role,
+    starredDocumentTemplateIds: (account.starredDocumentTemplateIds ?? []).map(
+      (id) => id.toString()
+    ),
     userType:
       role === "admin"
         ? "Firm admin"

@@ -258,6 +258,11 @@ router.patch("/ward-operators/:id", async (req: AuthRequest, res) => {
     if (typeof body.active === "boolean") profile.active = body.active;
     if (typeof body.operatorName === "string" && body.operatorName.trim()) {
       profile.operatorName = body.operatorName.trim();
+      const namedUser = await User.findById(profile.userId);
+      if (namedUser) {
+        namedUser.name = profile.operatorName;
+        await namedUser.save();
+      }
     }
     if (typeof body.username === "string" && body.username.trim()) {
       const normalizedUsername = normalizeWardUsername(body.username);
@@ -449,21 +454,20 @@ router.get("/ward-templates/:id/file", async (req, res) => {
       res.status(404).json({ error: "Template not found" });
       return;
     }
-    if (template.fileType !== "docx") {
-      res.status(400).json({
-        error: "Only DOCX templates can be edited in the browser",
-      });
-      return;
-    }
 
     const buffer = await readWardTemplateFileBuffer(template.storageKey);
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    );
+    const contentType =
+      template.fileType === "pdf"
+        ? "application/pdf"
+        : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    const fileName =
+      template.originalFileName?.trim() ||
+      `${template.slug || "template"}.${template.fileType === "pdf" ? "pdf" : "docx"}`;
+
+    res.setHeader("Content-Type", contentType);
     res.setHeader(
       "Content-Disposition",
-      `inline; filename="${encodeURIComponent(template.originalFileName)}"`
+      `attachment; filename="${encodeURIComponent(fileName)}"`
     );
     res.send(buffer);
   } catch (err) {

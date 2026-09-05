@@ -6,9 +6,26 @@ import {
 } from "./ward-variable-presets";
 import type { IWardTemplateVariable } from "../models/WardDocumentTemplate";
 
+function htmlWithPreservedAlignment(htmlContent: string): string {
+  return htmlContent
+    .replace(
+      /<p([^>]*)\bclass="([^"]*\btext-center\b[^"]*)"([^>]*)>/gi,
+      '<p$1class="$2" style="text-align: center"$3>'
+    )
+    .replace(
+      /<p([^>]*)\bclass="([^"]*\btext-right\b[^"]*)"([^>]*)>/gi,
+      '<p$1class="$2" style="text-align: right"$3>'
+    )
+    .replace(
+      /<p([^>]*)\bclass="([^"]*\btext-justify\b[^"]*)"([^>]*)>/gi,
+      '<p$1class="$2" style="text-align: justify"$3>'
+    );
+}
+
 export async function htmlContentToDocxBuffer(htmlContent: string): Promise<Buffer> {
   const HTMLtoDOCX = (await import("html-to-docx")).default;
-  const wrapped = `<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body style="font-family: 'Noto Sans Devanagari', 'Mangal', sans-serif; font-size: 14pt; line-height: 1.6;">${htmlContent}</body></html>`;
+  const alignedHtml = htmlWithPreservedAlignment(htmlContent);
+  const wrapped = `<!DOCTYPE html><html><head><meta charset="utf-8" /></head><body style="font-family: 'Noto Sans Devanagari', 'Mangal', sans-serif; font-size: 14pt; line-height: 1.6;">${alignedHtml}</body></html>`;
   const docxResult = await HTMLtoDOCX(wrapped, null, {
     table: { row: { cantSplit: true } },
     footer: false,

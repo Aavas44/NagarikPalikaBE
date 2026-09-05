@@ -1177,6 +1177,55 @@ router.get(
   }
 );
 
+router.put(
+  "/starred-document-templates/:templateId",
+  requireSajiloKanunAuth,
+  requireSkTeamMember,
+  async (req: SajiloKanunAuthRequest, res) => {
+    try {
+      const templateId = Array.isArray(req.params.templateId)
+        ? req.params.templateId[0]
+        : req.params.templateId;
+      if (!templateId || !mongoose.Types.ObjectId.isValid(templateId)) {
+        res.status(400).json({ error: "Invalid template id" });
+        return;
+      }
+      const starred = (req.body as { starred?: boolean }).starred;
+      if (typeof starred !== "boolean") {
+        res.status(400).json({ error: "starred boolean is required" });
+        return;
+      }
+
+      const template = await SajiloKanunDocumentTemplate.findOne({
+        _id: templateId,
+        status: "published",
+      });
+      if (!template) {
+        res.status(404).json({ error: "Published template not found" });
+        return;
+      }
+
+      const oid = new mongoose.Types.ObjectId(templateId);
+      await SajiloKanunAccount.updateOne(
+        { _id: req.sajiloKanunUser!.id },
+        starred
+          ? { $addToSet: { starredDocumentTemplateIds: oid } }
+          : { $pull: { starredDocumentTemplateIds: oid } }
+      );
+
+      const updated = await SajiloKanunAccount.findById(req.sajiloKanunUser!.id);
+      res.json({
+        starredDocumentTemplateIds: (
+          updated?.starredDocumentTemplateIds ?? []
+        ).map((id) => id.toString()),
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to update starred template" });
+    }
+  }
+);
+
 router.get(
   "/document-templates/:id/fields",
   requireSajiloKanunAuth,
@@ -1277,9 +1326,10 @@ router.post(
         return;
       }
 
-      const { templateId, variables } = req.body as {
+      const { templateId, variables, allowIncomplete } = req.body as {
         templateId?: string;
         variables?: Record<string, string | number>;
+        allowIncomplete?: boolean;
       };
       if (!templateId?.trim()) {
         res.status(400).json({ error: "templateId is required" });
@@ -1310,7 +1360,9 @@ router.post(
       const { generateSkDocument } = await import(
         "../services/sk-document-generation"
       );
-      const result = await generateSkDocument(template, variables ?? {});
+      const result = await generateSkDocument(template, variables ?? {}, {
+        validateRequired: allowIncomplete !== true,
+      });
 
       res.setHeader("Content-Type", result.contentType);
       res.setHeader(
@@ -1456,9 +1508,10 @@ router.post(
         return;
       }
 
-      const { templateId, variables } = req.body as {
+      const { templateId, variables, allowIncomplete } = req.body as {
         templateId?: string;
         variables?: Record<string, string | number>;
+        allowIncomplete?: boolean;
       };
       if (!templateId?.trim()) {
         res.status(400).json({ error: "templateId is required" });
@@ -1487,7 +1540,9 @@ router.post(
       const { generateSkDocument } = await import(
         "../services/sk-document-generation"
       );
-      const result = await generateSkDocument(template, variables ?? {});
+      const result = await generateSkDocument(template, variables ?? {}, {
+        validateRequired: allowIncomplete !== true,
+      });
 
       const saved = await saveCaseUploadBuffer({
         teamId,

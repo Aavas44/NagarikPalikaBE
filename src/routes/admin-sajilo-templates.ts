@@ -28,6 +28,7 @@ import {
   readSkTemplateFileBuffer,
   refreshSkTemplateVariablesFromDocx,
 } from "../services/sk-template-content";
+import { getR2Object } from "../services/r2-storage";
 
 const router = Router();
 
@@ -221,21 +222,23 @@ router.get("/sajilo-kanun-templates/:id/file", async (req, res) => {
       res.status(404).json({ error: "Template not found" });
       return;
     }
-    if (template.fileType !== "docx") {
-      res.status(400).json({
-        error: "Only DOCX templates can be edited in the browser",
-      });
-      return;
-    }
 
-    const buffer = await readSkTemplateFileBuffer(template.storageKey);
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    );
+    const buffer =
+      template.fileType === "docx"
+        ? await readSkTemplateFileBuffer(template.storageKey)
+        : await getR2Object(template.storageKey);
+    const contentType =
+      template.fileType === "pdf"
+        ? "application/pdf"
+        : "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+    const fileName =
+      template.originalFileName?.trim() ||
+      `${template.slug || "template"}.${template.fileType === "pdf" ? "pdf" : "docx"}`;
+
+    res.setHeader("Content-Type", contentType);
     res.setHeader(
       "Content-Disposition",
-      `inline; filename="${encodeURIComponent(template.originalFileName)}"`
+      `attachment; filename="${encodeURIComponent(fileName)}"`
     );
     res.send(buffer);
   } catch (err) {

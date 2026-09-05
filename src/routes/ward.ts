@@ -1,5 +1,6 @@
 import { Router } from "express";
 import bcrypt from "bcryptjs";
+import mongoose from "mongoose";
 import {
   requireAuth,
   requireWardOperator,
@@ -16,6 +17,7 @@ import {
   wardDocumentTemplateToJson,
 } from "../models/WardDocumentTemplate";
 import { generateWardDocument, getTemplateFormFields } from "../services/ward-document-generation";
+import { htmlContentToDocxBuffer } from "../services/ward-template-content";
 import { findWardOperatorForLogin } from "../services/ward-operator-auth";
 import {
   releaseWardGeneration,
@@ -130,6 +132,64 @@ router.get("/templates", requireAuth, requireWardOperator, async (_req, res) => 
   }
 });
 
+router.put(
+  "/starred-templates/:templateId",
+  requireAuth,
+  requireWardOperator,
+  async (req: AuthRequest, res) => {
+    try {
+      const templateId = Array.isArray(req.params.templateId)
+        ? req.params.templateId[0]
+        : req.params.templateId;
+      if (!templateId || !mongoose.Types.ObjectId.isValid(templateId)) {
+        res.status(400).json({ error: "Invalid template id" });
+        return;
+      }
+      const starred = (req.body as { starred?: boolean }).starred;
+      if (typeof starred !== "boolean") {
+        res.status(400).json({ error: "starred boolean is required" });
+        return;
+      }
+
+      const template = await WardDocumentTemplate.findOne({
+        _id: templateId,
+        status: "published",
+      });
+      if (!template) {
+        res.status(404).json({ error: "Published template not found" });
+        return;
+      }
+
+      const profile = await WardOperatorProfile.findOne({
+        userId: req.user!.id,
+        active: true,
+      });
+      if (!profile) {
+        res.status(403).json({ error: "Ward operator profile not found or inactive" });
+        return;
+      }
+
+      const oid = new mongoose.Types.ObjectId(templateId);
+      await WardOperatorProfile.updateOne(
+        { _id: profile._id },
+        starred
+          ? { $addToSet: { starredTemplateIds: oid } }
+          : { $pull: { starredTemplateIds: oid } }
+      );
+
+      const updated = await WardOperatorProfile.findById(profile._id);
+      res.json({
+        starredTemplateIds: (updated?.starredTemplateIds ?? []).map((id) =>
+          id.toString()
+        ),
+      });
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to update starred template" });
+    }
+  }
+);
+
 router.post("/documents/preview", requireAuth, requireWardOperator, async (req: AuthRequest, res) => {
   try {
     const { templateId, variables } = req.body as {
@@ -163,7 +223,8 @@ router.post("/documents/preview", requireAuth, requireWardOperator, async (req: 
     const result = await generateWardDocument(
       template,
       profile,
-      variables ?? {}
+      variables ?? {},
+      { validateRequired: false, forPreview: true }
     );
 
     res.setHeader("Content-Type", result.contentType);
@@ -182,9 +243,10 @@ router.post("/documents/preview", requireAuth, requireWardOperator, async (req: 
 
 router.post("/documents/generate", requireAuth, requireWardOperator, async (req: AuthRequest, res) => {
   try {
-    const { templateId, variables } = req.body as {
+    const { templateId, variables, allowIncomplete } = req.body as {
       templateId?: string;
       variables?: Record<string, string | number>;
+      allowIncomplete?: boolean;
     };
 
     if (!templateId?.trim()) {
@@ -220,7 +282,8 @@ router.post("/documents/generate", requireAuth, requireWardOperator, async (req:
       const result = await generateWardDocument(
         template,
         profile,
-        variables ?? {}
+        variables ?? {},
+        { validateRequired: allowIncomplete !== true }
       );
 
       res.setHeader("Content-Type", result.contentType);
@@ -246,6 +309,50 @@ router.post("/documents/generate", requireAuth, requireWardOperator, async (req:
     console.error(err);
     res.status(400).json({
       error: err instanceof Error ? err.message : "Failed to generate document",
+    });
+  }
+});
+
+/** Convert edited preview HTML to a downloadable DOCX (no quota charge). */
+router.post("/documents/from-html", requireAuth, requireWardOperator, async (req: AuthRequest, res) => {
+  try {
+    const { html, fileName } = req.body as {
+      html?: string;
+      fileName?: string;
+    };
+    if (!html?.trim()) {
+      res.status(400).json({ error: "html is required" });
+      return;
+    }
+
+    const profile = await WardOperatorProfile.findOne({
+      userId: req.user!.id,
+      active: true,
+    });
+    if (!profile) {
+      res.status(403).json({ error: "Ward operator profile not found or inactive" });
+      return;
+    }
+
+    const buffer = await htmlContentToDocxBuffer(html);
+    const safeName = (fileName?.trim() || "document.docx").replace(/[^\w.\u0900-\u097F-]+/g, "_");
+    const downloadName = safeName.toLowerCase().endsWith(".docx")
+      ? safeName
+      : `${safeName}.docx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodeURIComponent(downloadName)}"`
+    );
+    res.send(buffer);
+  } catch (err) {
+    console.error(err);
+    res.status(400).json({
+      error: err instanceof Error ? err.message : "Failed to convert HTML to document",
     });
   }
 });

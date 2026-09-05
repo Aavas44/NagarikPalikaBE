@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Process Supreme Court official petition DOCX forms:
 - strip footer notes (नोट)
-- convert blank underlines/dots to {blank_N} placeholders
+- convert blank underlines/dots to {blank_N} placeholders (paragraph-level)
 - write processed files + variables JSON
+
+Works on high / supreme / district entries in tmp/sc-forms/catalog.json.
 """
 
 from __future__ import annotations
@@ -11,7 +13,7 @@ import json
 import re
 import zipfile
 from pathlib import Path
-from urllib.parse import unquote
+from xml.sax.saxutils import escape as xml_escape
 
 ROOT = Path(__file__).resolve().parents[3] / "tmp" / "sc-forms"
 OUT = ROOT / "processed"
@@ -23,13 +25,22 @@ COURT_MAP = {
     "district": "district",
 }
 
-# Sequences of dots / underscores / ellipsis (incl. unicode)
+# Dot/underscore/ellipsis sequences, including spaced dots like ". . ."
 BLANK_RE = re.compile(
-    r"(?:\.{3,}|_{3,}|\u2026{1,}|\u2025{2,}|…{1,}|(?:\.\s*){3,})"
+    r"(?:"
+    r"\.{2,}"
+    r"|_{2,}"
+    r"|\u2026{1,}"
+    r"|\u2025{2,}"
+    r"|…{1,}"
+    r"|(?:\.\s*){2,}\."
+    r"|(?:\.\s+){2,}"
+    r"|(?:_+\s*){2,}"
+    r")"
 )
 
 DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
-FORM_NO_RE = re.compile(r"फाराम\s*न\s*[\.]?\s*([०-९0-9]+)", re.I)
+FORM_NO_RE = re.compile(r"फाराम\s*न[ं.]?\s*[.\-]?\s*([०-९0-9]+)", re.I)
 
 
 def slugify_ascii(text: str) -> str:
@@ -55,8 +66,37 @@ def empty_footer_xml() -> bytes:
     )
 
 
+def paragraph_plain_text(paragraph_xml: str) -> str:
+    text = re.sub(r"<w:tab[^/]*/>", " ", paragraph_xml)
+    text = re.sub(r"<[^>]+>", "", text)
+    text = (
+        text.replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", '"')
+        .replace("&#39;", "'")
+        .replace("&apos;", "'")
+    )
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def rewrite_paragraph_text(paragraph_xml: str, new_text: str) -> str:
+    p_pr_match = re.search(r"<w:pPr\b[\s\S]*?</w:pPr>", paragraph_xml, re.I)
+    p_pr = p_pr_match.group(0) if p_pr_match else ""
+    open_match = re.match(r"<w:p\b[^>]*>", paragraph_xml, re.I)
+    open_tag = open_match.group(0) if open_match else "<w:p>"
+    escaped = xml_escape(new_text)
+    return f'{open_tag}{p_pr}<w:r><w:t xml:space="preserve">{escaped}</w:t></w:r></w:p>'
+
+
 def replace_blanks_in_text(text: str, counter: list[int], vars_out: list[dict]) -> str:
     def repl(match: re.Match[str]) -> str:
+        # Ignore tiny leftover like single spaced dots already mostly covered
+        span = match.group(0)
+        # Require meaningful blank length (at least 2 dots/underscores worth)
+        meaningful = re.sub(r"\s+", "", span)
+        if len(meaningful) < 2:
+            return span
         counter[0] += 1
         n = counter[0]
         key = f"blank_{n}"
@@ -78,30 +118,19 @@ def process_document_xml(xml: str) -> tuple[str, list[dict]]:
     vars_out: list[dict] = []
     counter = [0]
 
-    def repl_t(match: re.Match[str]) -> str:
-        open_tag, body, close = match.group(1), match.group(2), match.group(3)
-        # Skip pure whitespace tags
-        if not body or not body.strip():
-            return match.group(0)
-        # Decode minimal entities for matching, then re-encode braces stay plain
-        decoded = (
-            body.replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", '"')
-        )
-        new_body = replace_blanks_in_text(decoded, counter, vars_out)
-        # escape xml specials again except we introduced { } which are fine
-        new_body = (
-            new_body.replace("&", "&amp;")
-            .replace("<", "&lt;")
-            .replace(">", "&gt;")
-        )
-        return f"{open_tag}{new_body}{close}"
+    def rewrite_para(match: re.Match[str]) -> str:
+        paragraph_xml = match.group(0)
+        plain = paragraph_plain_text(paragraph_xml)
+        if not plain:
+            return paragraph_xml
+        if not BLANK_RE.search(plain):
+            return paragraph_xml
+        new_plain = replace_blanks_in_text(plain, counter, vars_out)
+        if new_plain == plain:
+            return paragraph_xml
+        return rewrite_paragraph_text(paragraph_xml, new_plain)
 
-    # Match <w:t ...>text</w:t> including xml:space
-    pattern = re.compile(r"(<w:t(?:\s[^>]*)?>)(.*?)(</w:t>)", re.S)
-    new_xml = pattern.sub(repl_t, xml)
+    new_xml = re.sub(r"<w:p\b[\s\S]*?</w:p>", rewrite_para, xml)
     return new_xml, vars_out
 
 
@@ -129,19 +158,36 @@ def main() -> None:
     manifest = []
     OUT.mkdir(parents=True, exist_ok=True)
 
-    for court_key, items in catalog.items():
+    # Only process high + supreme unless --all
+    import sys
+
+    courts = ["high", "supreme"]
+    if "--all" in sys.argv:
+        courts = list(catalog.keys())
+
+    for court_key in courts:
+        items = catalog.get(court_key, [])
         court_type = COURT_MAP[court_key]
         for item in items:
             src = item.get("path")
-            if not src or not Path(src).exists():
+            if not src:
                 continue
             src_path = Path(src)
+            if not src_path.is_absolute():
+                # catalog paths may be repo-relative
+                candidate = Path(__file__).resolve().parents[3] / src
+                if candidate.exists():
+                    src_path = candidate
+            if not src_path.exists():
+                print(f"SKIP missing {court_type}: {src}")
+                continue
             title = item.get("title") or src_path.stem
             num = form_number(src_path.name, title)
             kind = (
-                f"official_form_{num}" if num is not None else f"official_{slugify_ascii(src_path.stem)}"
+                f"official_form_{num}"
+                if num is not None
+                else f"official_{slugify_ascii(src_path.stem)}"
             )
-            # ensure unique kind per court
             kind = f"{court_type}_{kind}"
             out_name = f"{kind}.docx"
             dest = OUT / court_type / out_name
@@ -160,7 +206,7 @@ def main() -> None:
             manifest.append(entry)
             print(f"{court_type}: {title[:40]} -> {len(variables)} vars")
 
-    (OUT / "manifest.json").write_text(
+    (OUT / "manifest-high-supreme.json").write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
     )
     print(f"Processed {len(manifest)} templates -> {OUT}")

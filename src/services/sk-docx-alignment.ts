@@ -35,6 +35,8 @@ function suggestCourtFormAlignment(text: string): JcValue | null {
   if (/^अनुसूची\s/u.test(value)) return "center";
   if (/^\(मुलुकी/u.test(value)) return "center";
   if (/जिल्ला अदालतमा पेस गरेको/u.test(value)) return "center";
+  if (/उच्च अदालतमा पेस गरेको/u.test(value)) return "center";
+  if (/सर्वोच्च अदालत/u.test(value) && /पेस गरेको/u.test(value)) return "center";
   if (/^निवेदन पत्र/u.test(value)) return "center";
   if (/^विषय\s*[:：]/u.test(value)) return "center";
 
@@ -68,6 +70,70 @@ function setParagraphJc(paragraphXml: string, align: JcValue): string {
   );
 }
 
+function makeRightAlignedParagraph(text: string): string {
+  const escaped = text
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+  return `<w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t xml:space="preserve">${escaped}</w:t></w:r></w:p>`;
+}
+
+function isFooterNivedakLabel(text: string): boolean {
+  return text === "निवेदक";
+}
+
+function isFooterNivedakName(text: string): boolean {
+  return text === "{निवेदकको_नाम}";
+}
+
+/**
+ * Footer signature block should read right-aligned as:
+ *   निवेदक
+ *   {निवेदकको_नाम}
+ */
+export function rightAlignFooterNivedakInXml(documentXml: string): string {
+  const paragraphs = documentXml.match(/<w:p\b[\s\S]*?<\/w:p>/gi);
+  if (!paragraphs || paragraphs.length === 0) return documentXml;
+
+  const start = Math.max(0, paragraphs.length - 22);
+  const replacements = new Map<number, string>();
+  let insertBeforeNameAt = -1;
+
+  for (let i = start; i < paragraphs.length; i++) {
+    const text = paragraphPlainText(paragraphs[i]);
+    if (isFooterNivedakLabel(text) || isFooterNivedakName(text)) {
+      replacements.set(i, setParagraphJc(paragraphs[i], "right"));
+    }
+  }
+
+  // If footer has {निवेदकको_नाम} without a preceding bare "निवेदक" label, insert one.
+  for (let i = start; i < paragraphs.length; i++) {
+    const text = paragraphPlainText(replacements.get(i) ?? paragraphs[i]);
+    if (!isFooterNivedakName(text)) continue;
+    const prevText =
+      i > 0
+        ? paragraphPlainText(replacements.get(i - 1) ?? paragraphs[i - 1])
+        : "";
+    if (!isFooterNivedakLabel(prevText)) {
+      insertBeforeNameAt = i;
+    }
+    break;
+  }
+
+  if (replacements.size === 0 && insertBeforeNameAt < 0) return documentXml;
+
+  let index = 0;
+  return documentXml.replace(/<w:p\b[\s\S]*?<\/w:p>/gi, (paragraphXml) => {
+    const current = index;
+    index += 1;
+    const updated = replacements.get(current) ?? paragraphXml;
+    if (current === insertBeforeNameAt) {
+      return `${makeRightAlignedParagraph("निवेदक")}${updated}`;
+    }
+    return updated;
+  });
+}
+
 function restoreAlignmentInXml(xml: string): string {
   return xml.replace(/<w:p\b[\s\S]*?<\/w:p>/g, (paragraphXml) => {
     const text = paragraphPlainText(paragraphXml);
@@ -80,17 +146,41 @@ function restoreAlignmentInXml(xml: string): string {
 /**
  * Re-apply standard Nepali court-form paragraph alignment when a DOCX has lost
  * w:jc markers (e.g. after HTML round-trip in the admin editor).
+ * Always also right-aligns footer निवेदक / {निवेदकको_नाम}.
  */
 export function restoreCourtFormAlignment(buffer: Buffer): Buffer {
-  if (docxHasParagraphAlignment(buffer)) return buffer;
-
   const zip = new PizZip(buffer);
+  const hadAlignment = docxHasParagraphAlignment(buffer);
+
   for (const fileName of Object.keys(zip.files)) {
     if (!fileName.startsWith("word/") || !fileName.endsWith(".xml")) continue;
-    const xml = zip.files[fileName].asText();
-    zip.file(fileName, restoreAlignmentInXml(xml));
+    let xml = zip.files[fileName].asText();
+    if (!hadAlignment) {
+      xml = restoreAlignmentInXml(xml);
+    }
+    if (fileName === "word/document.xml") {
+      xml = rightAlignFooterNivedakInXml(xml);
+    }
+    zip.file(fileName, xml);
   }
 
+  return Buffer.from(
+    zip.generate({
+      type: "nodebuffer",
+      compression: "DEFLATE",
+    })
+  );
+}
+
+/** Always right-align footer निवेदक / {निवेदकको_नाम}, even when other jc exists. */
+export function rightAlignFooterNivedak(buffer: Buffer): Buffer {
+  const zip = new PizZip(buffer);
+  const doc = zip.files["word/document.xml"];
+  if (!doc) return buffer;
+  const before = doc.asText();
+  const next = rightAlignFooterNivedakInXml(before);
+  if (next === before) return buffer;
+  zip.file("word/document.xml", next);
   return Buffer.from(
     zip.generate({
       type: "nodebuffer",

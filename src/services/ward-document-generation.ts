@@ -9,9 +9,33 @@ import {
   buildUserFieldsFromPlaceholders,
   expandMergedVariables,
   isAutoFilledVariableKey,
+  presetForVariableKey,
 } from "./ward-variable-presets";
 
 export type WardGenerationVariables = Record<string, string | number>;
+
+const WARD_FIELD_START = "\uE000";
+const WARD_FIELD_MID = "\uE001";
+const WARD_FIELD_END_START = "\uE002";
+const WARD_FIELD_END = "\uE003";
+
+function wrapPreviewField(key: string, display: string): string {
+  return `${WARD_FIELD_START}${key}${WARD_FIELD_MID}${display}${WARD_FIELD_END_START}${key}${WARD_FIELD_END}`;
+}
+
+function previewDisplayForField(
+  template: IWardDocumentTemplate,
+  key: string,
+  value: string
+): string {
+  if (value.trim()) return value;
+  const meta = template.variables.find((variable) => variable.key === key);
+  if (meta?.labelNe || meta?.labelEn) {
+    return meta.labelNe || meta.labelEn;
+  }
+  const preset = presetForVariableKey(key);
+  return preset.labelNe || preset.labelEn || key;
+}
 
 function profileToVariables(
   profile: IWardOperatorProfile
@@ -82,7 +106,8 @@ export async function getTemplateFormFields(template: IWardDocumentTemplate) {
 export async function generateWardDocument(
   template: IWardDocumentTemplate,
   profile: IWardOperatorProfile,
-  inputValues: WardGenerationVariables
+  inputValues: WardGenerationVariables,
+  options?: { validateRequired?: boolean; forPreview?: boolean }
 ): Promise<{ buffer: Buffer; fileName: string; contentType: string }> {
   const templateBuffer = await getR2Object(template.storageKey);
   const placeholderKeys = extractPlaceholdersFromDocx(templateBuffer);
@@ -94,7 +119,19 @@ export async function generateWardDocument(
     },
     placeholderKeys
   );
-  validateRequiredVariables(template, placeholderKeys, merged);
+
+  if (options?.forPreview) {
+    for (const key of placeholderKeys) {
+      merged[key] = wrapPreviewField(
+        key,
+        previewDisplayForField(template, key, merged[key])
+      );
+    }
+  }
+
+  if (options?.validateRequired !== false) {
+    validateRequiredVariables(template, placeholderKeys, merged);
+  }
 
   if (template.fileType === "docx") {
     const zip = new PizZip(templateBuffer);
