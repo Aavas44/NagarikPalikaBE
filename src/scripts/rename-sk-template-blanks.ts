@@ -271,7 +271,7 @@ async function callGeminiJson(prompt: string, attempt = 1): Promise<string> {
     model: { id: modelId },
     local: { cwd: process.cwd(), store: new JsonlLocalAgentStore(process.cwd()) },
   });
-  if (result.status !== "completed" && result.status !== "finished") {
+  if (result.status !== "finished") {
     console.error("Agent failed with status:", result.status, result);
     throw new Error(`Agent failed with status: ${result.status}`);
   }

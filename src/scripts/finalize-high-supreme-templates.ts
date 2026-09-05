@@ -67,7 +67,7 @@ function parseArgs(argv: string[]) {
   const modeIdx = argv.indexOf("--mode");
   const modeRaw =
     modeIdx >= 0 && argv[modeIdx + 1] ? argv[modeIdx + 1].trim() : "auto";
-  const mode =
+  const mode: "auto" | "rules" | "gemini" =
     modeRaw === "rules" || modeRaw === "gemini" || modeRaw === "auto"
       ? modeRaw
       : "auto";
@@ -968,7 +968,7 @@ async function processOne(
     return { status: `missing:${srcPath}`, vars: 0 };
   }
 
-  let buffer = fs.readFileSync(srcPath);
+  let buffer: Buffer = fs.readFileSync(srcPath);
   const blanks = collectBlankContexts(buffer);
   if (blanks.length === 0) {
     buffer = polishBuffer(buffer, entry.courtType);

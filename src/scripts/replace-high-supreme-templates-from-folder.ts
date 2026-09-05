@@ -19,6 +19,7 @@ import {
 } from "../services/sk-template-storage";
 import { extractPlaceholdersFromDocx } from "../services/ward-docx-placeholders";
 import { mergeTemplateVariables } from "../services/ward-variable-presets";
+import type { ISkTemplateVariable } from "../models/SajiloKanunDocumentTemplate";
 import type { CourtType } from "../lib/court-type";
 import { buildTemplateNameRoman } from "../lib/nepali-romanize";
 
@@ -162,7 +163,10 @@ async function replaceCourt(
       const metaByKey = new Map(
         meta.map((v) => [v.key, v] as const).filter(([k]) => Boolean(k))
       );
-      let variables = mergeTemplateVariables([], detected);
+      let variables: ISkTemplateVariable[] = mergeTemplateVariables(
+        [],
+        detected
+      );
       variables = variables.map((v) => {
         const m = metaByKey.get(v.key);
         if (!m) return v;
@@ -170,7 +174,7 @@ async function replaceCourt(
           ...v,
           labelNe: m.labelNe?.trim() || v.labelNe,
           labelEn: m.labelEn?.trim() || v.labelEn,
-          section: m.section?.trim() || v.section || "",
+          section: m.section?.trim() || "",
         };
       });
 
@@ -226,7 +230,10 @@ async function replaceCourt(
       const metaByKey = new Map(
         meta.map((v) => [v.key, v] as const).filter(([k]) => Boolean(k))
       );
-      let variables = mergeTemplateVariables([], detected);
+      let variables: ISkTemplateVariable[] = mergeTemplateVariables(
+        [],
+        detected
+      );
       variables = variables.map((v) => {
         const m = metaByKey.get(v.key);
         if (!m) return v;
@@ -234,7 +241,7 @@ async function replaceCourt(
           ...v,
           labelNe: m.labelNe?.trim() || v.labelNe,
           labelEn: m.labelEn?.trim() || v.labelEn,
-          section: m.section?.trim() || v.section || "",
+          section: m.section?.trim() || "",
         };
       });
       const nameNe = source.fileName
