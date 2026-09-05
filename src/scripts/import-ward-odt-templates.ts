@@ -9,7 +9,7 @@
  *   npx tsx src/scripts/import-ward-odt-templates.ts --dry-run
  *   npx tsx src/scripts/import-ward-odt-templates.ts
  *   npx tsx src/scripts/import-ward-odt-templates.ts --replace
- *   npx tsx src/scripts/import-ward-odt-templates.ts --json ../tmp/woda-templates.json
+ *   npx tsx src/scripts/import-ward-odt-templates.ts --replace --only "नाता प्रमाणित निवेदन"
  */
 import "dotenv/config";
 import fs from "fs";
@@ -27,7 +27,8 @@ import { htmlContentToDocxBuffer } from "../services/ward-template-content";
 import { extractPlaceholdersFromDocx } from "../services/ward-docx-placeholders";
 import { mergeTemplateVariables } from "../services/ward-variable-presets";
 
-type Para = { align: string | null; text: string };
+type TableBlock = { headers: string[]; rows: string[][] };
+type Para = { align: string | null; text: string; table?: TableBlock };
 type JsonTemplate = { header: string; name: string; paras: Para[] };
 
 const NAME_EN: Record<string, string> = {
@@ -59,11 +60,17 @@ function parseArgs(argv: string[]) {
   const dryRun = argv.includes("--dry-run");
   const replace = argv.includes("--replace");
   const jsonIdx = argv.indexOf("--json");
+  const onlyIdx = argv.indexOf("--only");
   const jsonPath =
     jsonIdx >= 0 && argv[jsonIdx + 1]
       ? path.resolve(argv[jsonIdx + 1])
       : path.resolve(__dirname, "../../../tmp/woda-templates.json");
-  return { dryRun, replace, jsonPath };
+  const onlyRaw =
+    onlyIdx >= 0 && argv[onlyIdx + 1] ? argv[onlyIdx + 1].trim() : "";
+  const only = onlyRaw
+    ? onlyRaw.split(",").map((part) => part.trim()).filter(Boolean)
+    : [];
+  return { dryRun, replace, jsonPath, only };
 }
 
 function slugifyEn(value: string): string {
@@ -136,9 +143,29 @@ function paraToHtml(text: string, align: string): string {
   return `<p class="${cls}" style="${style} ${margin}">${escapeHtml(text)}</p>`;
 }
 
+function tableToHtml(table: TableBlock): string {
+  const headerCells = table.headers
+    .map((cell) => `<td><b>${escapeHtml(cell)}</b></td>`)
+    .join("");
+  const bodyRows = table.rows
+    .map(
+      (row) =>
+        `<tr>${row.map((cell) => `<td>${escapeHtml(cell)}</td>`).join("")}</tr>`
+    )
+    .join("\n");
+  return `<table border="1" width="100%" cellpadding="6" cellspacing="0">
+<tr>${headerCells}</tr>
+${bodyRows}
+</table>`;
+}
+
 function templateToHtml(paras: Para[]): string {
   const parts: string[] = [];
   for (const p of paras) {
+    if (p.table) {
+      parts.push(tableToHtml(p.table));
+      continue;
+    }
     const text = (p.text || "").trim();
     if (!text) {
       parts.push('<p style="margin: 0.4em 0;">&nbsp;</p>');
@@ -159,7 +186,7 @@ async function uniqueSlug(base: string): Promise<string> {
 }
 
 async function main() {
-  const { dryRun, replace, jsonPath } = parseArgs(process.argv.slice(2));
+  const { dryRun, replace, jsonPath, only } = parseArgs(process.argv.slice(2));
   if (!fs.existsSync(jsonPath)) {
     throw new Error(`JSON not found: ${jsonPath}`);
   }
@@ -178,6 +205,12 @@ async function main() {
 
   for (const t of templates) {
     const nameNe = t.name.trim();
+    if (
+      only.length > 0 &&
+      !only.some((name) => nameNe === name || nameNe.includes(name))
+    ) {
+      continue;
+    }
     const nameEn = NAME_EN[nameNe] || nameNe;
     const slugBase = slugifyEn(nameEn) || `ward-app-${created + updated + 1}`;
     const html = templateToHtml(t.paras || []);

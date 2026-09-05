@@ -321,7 +321,14 @@ function looksLikeTodayDateField(key: string): boolean {
   return /^(आजको_)?मिति$/.test(key) || /आवेदन.?मिति/.test(key);
 }
 
+export function tableSerialValueFromKey(key: string): string | null {
+  const match = key.trim().match(/^क्र_सं_(\d+)$/);
+  if (!match) return null;
+  return match[1].replace(/\d/g, (digit) => "०१२३४५६७८९"[Number(digit)] ?? digit);
+}
+
 export function isAutoFilledVariableKey(key: string): boolean {
+  if (tableSerialValueFromKey(key)) return true;
   return resolveWardAutoFillTarget(key) !== null;
 }
 
@@ -342,11 +349,50 @@ export function presetForVariableKey(key: string): {
   const humanized = normalized
     .replace(/_/g, " ")
     .replace(/\b\w/g, (char) => char.toUpperCase());
+  const numbered = numberedTableFieldMeta(key);
   const nepaliFromTokens = nepaliLabelFromKey(normalized);
   return {
-    labelEn: humanized,
-    labelNe: nepaliFromTokens || humanized,
-    required: true,
+    labelEn: numbered?.labelEn || humanized,
+    labelNe: numbered?.labelNe || nepaliFromTokens || humanized,
+    required: numbered ? numbered.required : true,
+  };
+}
+
+const TABLE_COLUMN_LABELS: Record<string, { en: string; ne: string }> = {
+  क्र_सं: { en: "S.N.", ne: "क्र.सं." },
+  नाम_थर: { en: "Name, surname", ne: "नाम, थर" },
+  नागरिकता_जन्मदर्ता_नम्बर: {
+    en: "Citizenship / birth registration no.",
+    ne: "नागरिकता / जन्मदर्ता नं.",
+  },
+  नाता: { en: "Relation", ne: "नाता" },
+  कैफियत: { en: "Remarks", ne: "कैफियत" },
+  आम्दानीको_स्रोत: { en: "Source of income", ne: "आम्दानीको स्रोत" },
+  आय_आर्जन_गर्ने_व्यक्ति: {
+    en: "Income earner",
+    ne: "आय आर्जन गर्ने व्यक्ति",
+  },
+  वार्षिक_आय_रकम: { en: "Annual income", ne: "वार्षिक आय रकम" },
+  निवेदकसँगको_नाता: { en: "Relation to applicant", ne: "निवेदकसँगको नाता" },
+};
+
+function numberedTableFieldMeta(key: string): {
+  labelEn: string;
+  labelNe: string;
+  required: boolean;
+} | null {
+  const match = key.trim().match(/^(.+)_(\d+)$/);
+  if (!match) return null;
+  const column = TABLE_COLUMN_LABELS[match[1]];
+  if (!column) return null;
+  const row = Number(match[2]);
+  const rowNe = String(row).replace(/\d/g, (digit) => "०१२३४५६७८९"[Number(digit)] ?? digit);
+  const optional =
+    match[1] === "कैफियत" || match[1] === "क्र_सं" || row > 1;
+  return {
+    labelEn: `${column.en} (${row})`,
+    labelNe: `${column.ne} (${rowNe})`,
+    required: !optional,
   };
 }
 
@@ -459,6 +505,12 @@ export function expandMergedVariables(
 
   for (const rawKey of placeholderKeys) {
     if (normalized[rawKey]?.trim()) continue;
+    const serial = tableSerialValueFromKey(rawKey);
+    if (serial) {
+      normalized[rawKey] = serial;
+      normalized[normalizeVariableKey(rawKey)] = serial;
+      continue;
+    }
     const resolved = resolveCanonicalValue(normalized, rawKey);
     if (resolved) {
       normalized[rawKey] = resolved;

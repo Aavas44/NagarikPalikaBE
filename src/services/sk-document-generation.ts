@@ -3,6 +3,10 @@ import PizZip from "pizzip";
 import type { ISajiloKanunDocumentTemplate } from "../models/SajiloKanunDocumentTemplate";
 import { extractPlaceholdersFromDocx } from "./ward-docx-placeholders";
 import { readSkTemplateFileBuffer } from "./sk-template-content";
+import {
+  parseTableRowCount,
+  scaleNumberedTableRowsInDocx,
+} from "./docx-numbered-table-rows";
 
 export type SkGenerationVariables = Record<string, string | number>;
 
@@ -40,11 +44,14 @@ function sanitizeValues(
 
 function validateRequiredVariables(
   template: ISajiloKanunDocumentTemplate,
-  values: Record<string, string>
+  values: Record<string, string>,
+  placeholderKeys: string[]
 ): void {
+  const present = new Set(placeholderKeys);
   const missing: string[] = [];
   for (const variable of template.variables) {
     if (!variable.required) continue;
+    if (!present.has(variable.key)) continue;
     // Official SC forms mark every blank as required; treat generic blanks as optional.
     if (/^blank_\d+$/i.test(variable.key)) continue;
     if (/^unknown_\d+$/i.test(variable.key)) continue;
@@ -121,7 +128,12 @@ export async function generateSkDocument(
   }
 
   const templateBuffer = await readSkTemplateFileBuffer(template.storageKey);
-  const placeholderKeys = extractPlaceholdersFromDocx(templateBuffer);
+  const rowCount = parseTableRowCount(inputValues);
+  const workingBuffer =
+    rowCount == null
+      ? templateBuffer
+      : scaleNumberedTableRowsInDocx(templateBuffer, rowCount);
+  const placeholderKeys = extractPlaceholdersFromDocx(workingBuffer);
   const merged = sanitizeValues(placeholderKeys, inputValues);
 
   if (options?.forPreview) {
@@ -134,10 +146,10 @@ export async function generateSkDocument(
   }
 
   if (options?.validateRequired !== false) {
-    validateRequiredVariables(template, merged);
+    validateRequiredVariables(template, merged, placeholderKeys);
   }
 
-  const zip = new PizZip(templateBuffer);
+  const zip = new PizZip(workingBuffer);
   const doc = new Docxtemplater(zip, {
     paragraphLoop: true,
     linebreaks: true,

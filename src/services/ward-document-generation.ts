@@ -6,10 +6,15 @@ import type { IWardOperatorProfile } from "../models/WardOperatorProfile";
 import { extractPlaceholdersFromDocx } from "./ward-docx-placeholders";
 import { buildWardProfileVariables } from "./ward-profile-variables";
 import {
+  parseTableRowCount,
+  scaleNumberedTableRowsInDocx,
+} from "./docx-numbered-table-rows";
+import {
   buildUserFieldsFromPlaceholders,
   expandMergedVariables,
   isAutoFilledVariableKey,
   presetForVariableKey,
+  tableSerialValueFromKey,
 } from "./ward-variable-presets";
 
 export type WardGenerationVariables = Record<string, string | number>;
@@ -99,7 +104,10 @@ export async function getTemplateFormFields(template: IWardDocumentTemplate) {
       type: field.type,
       required: field.required,
     })),
-    autoFieldKeys: placeholderKeys.filter((key) => isAutoFilledVariableKey(key)),
+    autoFieldKeys: placeholderKeys.filter(
+      (key) =>
+        isAutoFilledVariableKey(key) && !tableSerialValueFromKey(key)
+    ),
   };
 }
 
@@ -110,7 +118,12 @@ export async function generateWardDocument(
   options?: { validateRequired?: boolean; forPreview?: boolean }
 ): Promise<{ buffer: Buffer; fileName: string; contentType: string }> {
   const templateBuffer = await getR2Object(template.storageKey);
-  const placeholderKeys = extractPlaceholdersFromDocx(templateBuffer);
+  const rowCount = parseTableRowCount(inputValues);
+  const workingBuffer =
+    rowCount == null
+      ? templateBuffer
+      : scaleNumberedTableRowsInDocx(templateBuffer, rowCount);
+  const placeholderKeys = extractPlaceholdersFromDocx(workingBuffer);
 
   const merged = sanitizeMergedValues(
     {
@@ -134,7 +147,7 @@ export async function generateWardDocument(
   }
 
   if (template.fileType === "docx") {
-    const zip = new PizZip(templateBuffer);
+    const zip = new PizZip(workingBuffer);
     const doc = new Docxtemplater(zip, {
       paragraphLoop: true,
       linebreaks: true,

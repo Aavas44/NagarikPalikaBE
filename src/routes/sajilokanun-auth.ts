@@ -1442,6 +1442,35 @@ router.post(
           value === undefined || value === null ? "" : String(value).trim();
       }
 
+      const { parseTableRowCount } = await import(
+        "../services/docx-numbered-table-rows"
+      );
+      const rowCount = parseTableRowCount(userValues);
+      const seenFieldKeys = new Set(fields.userFields.map((f) => f.key));
+      const aiFields = fields.userFields.map((f) => ({
+        key: f.key,
+        labelEn: f.label.en,
+        labelNe: f.label.ne,
+        section: f.section,
+      }));
+      if (rowCount != null && rowCount > 1) {
+        for (const field of fields.userFields) {
+          const match = field.key.match(/^(.*)_1$/);
+          if (!match) continue;
+          for (let row = 2; row <= rowCount; row += 1) {
+            const key = `${match[1]}_${row}`;
+            if (seenFieldKeys.has(key)) continue;
+            seenFieldKeys.add(key);
+            aiFields.push({
+              key,
+              labelEn: field.label.en,
+              labelNe: field.label.ne,
+              section: field.section,
+            });
+          }
+        }
+      }
+
       const caseVitals =
         legalCase.documentExtraction?.facts &&
         typeof legalCase.documentExtraction.facts === "object"
@@ -1451,18 +1480,15 @@ router.post(
       const filled = await aiFillSkTemplateValues({
         templateName:
           template.nameNe || template.nameEn || template.slug || templateId,
-        fields: fields.userFields.map((f) => ({
-          key: f.key,
-          labelEn: f.label.en,
-          labelNe: f.label.ne,
-          section: f.section,
-        })),
+        fields: aiFields,
         caseVitals,
         userValues,
       });
 
+      const mergedValues = { ...userValues, ...filled.values };
+
       // Validate by rendering (no preview markers)
-      const result = await generateSkDocument(template, filled.values, {
+      const result = await generateSkDocument(template, mergedValues, {
         validateRequired: false,
       });
 
